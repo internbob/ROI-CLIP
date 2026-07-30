@@ -5,7 +5,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .heads import GlobalClassifierHead, ROIClassifierHead
-from .clinical_encoder import ClinicalGatedFusion, ImagingClinicalCrossTransformer
+from .clinical_encoder import ClinicalAtlasPromptFusion, ClinicalGatedFusion, ImagingClinicalCrossTransformer
 from .prototypes import DiseasePrototypeBank
 from .relation import pairwise_cosine_matrix
 from .volume_encoder import SFCNVolumeEncoder3D
@@ -34,7 +34,7 @@ class MRIOnlyStudent(nn.Module):
         super().__init__()
         self.use_clinical = bool(use_clinical)
         self.clinical_fusion_mode = str(clinical_fusion_mode).lower()
-        if self.clinical_fusion_mode not in {"gated", "cross"}:
+        if self.clinical_fusion_mode not in {"gated", "cross", "atlas_prompt"}:
             raise ValueError(f"Unsupported clinical fusion mode: {clinical_fusion_mode}")
         self.volume_encoder = SFCNVolumeEncoder3D(
             in_channels=1,
@@ -89,6 +89,19 @@ class MRIOnlyStudent(nn.Module):
             if self.use_clinical and self.clinical_fusion_mode == "cross"
             else None
         )
+        self.clinical_atlas_prompt = (
+            ClinicalAtlasPromptFusion(
+                clinical_input_dim=int(clinical_input_dim),
+                feature_dim=feature_dim,
+                roi_dim=proj_dim,
+                num_rois=num_rois,
+                num_domain_prompts=max(2, int(clinical_num_layers) * 2),
+                num_heads=int(clinical_num_heads),
+                dropout=float(clinical_dropout),
+            )
+            if self.use_clinical and self.clinical_fusion_mode == "atlas_prompt"
+            else None
+        )
         roi_residual_init = min(max(float(roi_residual_init), 1e-4), 1.0 - 1e-4)
         self.roi_logit_scale = nn.Parameter(torch.tensor(math.log(roi_residual_init / (1.0 - roi_residual_init))))
 
@@ -107,6 +120,7 @@ class MRIOnlyStudent(nn.Module):
         z_student = F.normalize(self.projector(student_tokens), dim=-1)
         classifier_tokens = z_student
         cross_outputs = None
+        prompt_outputs = None
         clinical_feature = None
         clinical_gate = None
         if self.use_clinical:
@@ -118,12 +132,24 @@ class MRIOnlyStudent(nn.Module):
                     clinical_data,
                 )
                 global_logits = self.global_head(fused_global_feat)
-            else:
+            elif self.clinical_fusion_mode == "cross":
                 imaging_tokens = torch.cat([self.global_to_cross(global_feat).unsqueeze(1), z_student], dim=1)
                 cross_outputs = self.clinical_cross_fusion(imaging_tokens, clinical_data)
                 fused_global_feat = cross_outputs["image_tokens"][:, 0]
                 classifier_tokens = cross_outputs["image_tokens"][:, 1:]
                 global_logits = self.cross_global_head(fused_global_feat)
+            else:
+                prompt_outputs = self.clinical_atlas_prompt(
+                    global_feature=global_feat,
+                    clinical_data=clinical_data,
+                    volume_tokens=z_student,
+                )
+                fused_global_feat = prompt_outputs["global_feature"]
+                clinical_feature = prompt_outputs["clinical_feature"]
+                clinical_gate = prompt_outputs["clinical_gate"]
+                z_student = prompt_outputs["volume_tokens"]
+                classifier_tokens = z_student
+                global_logits = self.global_head(fused_global_feat)
         else:
             fused_global_feat = global_feat
             global_logits = self.global_head(global_feat)
@@ -150,11 +176,24 @@ class MRIOnlyStudent(nn.Module):
             "clinical_feature": clinical_feature,
             "clinical_gate": clinical_gate,
             "cross_image_tokens": cross_outputs["image_tokens"] if cross_outputs is not None else None,
-            "clinical_tokens": cross_outputs["clinical_tokens"] if cross_outputs is not None else None,
+            "clinical_tokens": (
+                cross_outputs["clinical_tokens"]
+                if cross_outputs is not None
+                else prompt_outputs["clinical_tokens"]
+                if prompt_outputs is not None
+                else None
+            ),
             "image_to_clinical_attention": (
                 cross_outputs["image_to_clinical_attention"] if cross_outputs is not None else None
             ),
             "clinical_to_image_attention": (
                 cross_outputs["clinical_to_image_attention"] if cross_outputs is not None else None
             ),
+            "clinical_domain_prompts": (
+                prompt_outputs["clinical_domain_prompts"] if prompt_outputs is not None else None
+            ),
+            "clinical_domain_attention": (
+                prompt_outputs["clinical_domain_attention"] if prompt_outputs is not None else None
+            ),
+            "roi_prompt_attention": prompt_outputs["roi_prompt_attention"] if prompt_outputs is not None else None,
         }

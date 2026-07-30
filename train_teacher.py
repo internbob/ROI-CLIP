@@ -9,9 +9,22 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from data import build_dataloaders
-from losses import classification_loss, prototype_loss, relation_consistency_loss, roi_clip_loss
+from data.ico_utils import get_ico_topology, infer_ico_level
+from losses import (
+    anatomical_transport_roi_clip_loss,
+    classification_loss,
+    distance_weighted_roi_clip_loss,
+    prototype_loss,
+    relation_consistency_loss,
+    roi_clip_loss,
+)
 from metrics import AverageMeter, compute_classification_metrics, format_classification_metrics
-from models.teacher import CortexWeaveROIClipTeacher, MRIClinicalCLIPBaseline, SurfaceOnlyTransformerBaseline
+from models.teacher import (
+    CortexWeaveROIClipTeacher,
+    MRIClinicalCLIPBaseline,
+    SurfaceOnlyTransformerBaseline,
+    SurfaceVolumeConcatBaseline,
+)
 from options import Option
 from utils import (
     CheckpointIO,
@@ -50,6 +63,99 @@ def auxiliary_loss_scale_for_epoch(epoch, ce_warmup_epochs):
     return 0.0 if int(epoch) < max(0, int(ce_warmup_epochs)) else 1.0
 
 
+def _roi_hemi_and_base(region_name, index, num_rois):
+    name = str(region_name or "").lower()
+    for prefix, hemi in [("lh_", "lh"), ("left_", "lh"), ("l_", "lh"), ("rh_", "rh"), ("right_", "rh"), ("r_", "rh")]:
+        if name.startswith(prefix):
+            return hemi, name[len(prefix):]
+    return ("lh" if int(index) < int(num_rois) // 2 else "rh"), name or f"roi_{int(index)}"
+
+
+def _load_reference_surface_roi_masks(dataset):
+    if getattr(dataset, "preprocess_cache_root", "") and getattr(dataset, "samples", None):
+        try:
+            cached = dataset._load_cached_inputs(dataset.samples[0])
+            if cached is not None:
+                return cached["surface_roi_masks"]
+        except Exception:
+            pass
+    sample = dataset[0]
+    return sample["surface_roi_masks"].detach().cpu().numpy()
+
+
+def build_roi_clip_affinity(dataset, cfg, logger=None):
+    mode = str(getattr(cfg.training, "roi_clip_alignment_mode", "hard")).lower()
+    if mode in {"hard", "identity", "onehot"}:
+        return None
+
+    num_rois = int(cfg.model.num_rois)
+    num_vertices = int(cfg.data.num_vertices)
+    per_hemi = max(1, num_vertices // 2)
+    ico_level = infer_ico_level(per_hemi)
+    hemi_coords, _ = get_ico_topology(ico_level)
+    hemi_coords = hemi_coords.astype(np.float32)
+    coords = np.concatenate([hemi_coords, hemi_coords], axis=0)
+    coords = coords / (np.linalg.norm(coords, axis=1, keepdims=True) + 1e-6)
+
+    roi_masks = np.asarray(_load_reference_surface_roi_masks(dataset), dtype=np.float32)
+    if roi_masks.shape[0] != num_rois or roi_masks.shape[1] != coords.shape[0]:
+        raise ValueError(
+            f"Cannot build ROI-CLIP affinity: masks={roi_masks.shape}, expected=({num_rois}, {coords.shape[0]})"
+        )
+
+    centroids = []
+    for roi_idx in range(num_rois):
+        weights = roi_masks[roi_idx]
+        denom = float(weights.sum())
+        center = coords.mean(axis=0) if denom <= 1e-6 else (weights[:, None] * coords).sum(axis=0) / denom
+        center = center / (np.linalg.norm(center) + 1e-6)
+        centroids.append(center.astype(np.float32))
+    centroids = np.stack(centroids, axis=0)
+
+    region_names = list(getattr(dataset, "atlas_region_names", []))
+    if len(region_names) != num_rois:
+        region_names = [f"roi_{idx:02d}" for idx in range(num_rois)]
+    parts = [_roi_hemi_and_base(name, idx, num_rois) for idx, name in enumerate(region_names)]
+    hemis = np.asarray([part[0] for part in parts])
+    bases = np.asarray([part[1] for part in parts])
+    same_hemi = hemis[:, None] == hemis[None, :]
+    homology = (hemis[:, None] != hemis[None, :]) & (bases[:, None] == bases[None, :])
+
+    distance = np.linalg.norm(centroids[:, None, :] - centroids[None, :, :], axis=-1)
+    offdiag = ~np.eye(num_rois, dtype=bool)
+    within_distances = distance[same_hemi & offdiag]
+    sigma = float(getattr(cfg.training, "roi_clip_distance_sigma", 0.0))
+    if sigma <= 0.0:
+        sigma = float(np.median(within_distances[within_distances > 1e-6])) if np.any(within_distances > 1e-6) else 1.0
+    sigma = max(sigma, 1e-6)
+
+    affinity = np.exp(-(distance ** 2) / (2.0 * sigma ** 2)).astype(np.float32)
+    affinity[~same_hemi] = 0.0
+    np.fill_diagonal(affinity, 0.0)
+
+    homology_weight = max(0.0, float(getattr(cfg.training, "roi_clip_homology_weight", 1.0)))
+    affinity = affinity + homology_weight * homology.astype(np.float32)
+    np.fill_diagonal(affinity, 0.0)
+
+    topk = int(getattr(cfg.training, "roi_clip_affinity_topk", 0))
+    if topk > 0:
+        sparse = np.zeros_like(affinity, dtype=np.float32)
+        for roi_idx in range(num_rois):
+            candidates = np.argsort(affinity[roi_idx])[::-1]
+            selected = [idx for idx in candidates if affinity[roi_idx, idx] > 0.0][:topk]
+            if selected:
+                sparse[roi_idx, selected] = affinity[roi_idx, selected]
+        affinity = np.maximum(sparse, sparse.T)
+
+    if logger is not None:
+        logger.print_message(
+            "Teacher ROI-CLIP alignment "
+            f"mode={mode} sigma={sigma:.4f} homology_weight={homology_weight:.3f} "
+            f"topk={topk} nonzero_edges={int(np.count_nonzero(affinity))}"
+        )
+    return torch.from_numpy(affinity.astype(np.float32))
+
+
 def build_model(cfg):
     num_classes = int(getattr(cfg.model, "num_classes", infer_num_classes(cfg.data.task)))
     use_clinical = bool(getattr(cfg.model, "use_clinical", False))
@@ -83,6 +189,25 @@ def build_model(cfg):
             clinical_hidden_dim=int(getattr(cfg.model, "clinical_hidden_dim", 256)),
             clinical_num_heads=int(getattr(cfg.model, "clinical_num_heads", 4)),
             clinical_num_layers=int(getattr(cfg.model, "clinical_num_layers", 2)),
+        )
+    if "surface-volume-concat" in method or "surface_volume_concat" in method:
+        return SurfaceVolumeConcatBaseline(
+            surface_in_channels=int(cfg.model.surface_in_channels),
+            feature_dim=int(cfg.model.feature_dim),
+            num_classes=num_classes,
+            num_vertices=int(cfg.data.num_vertices),
+            base_channels=int(cfg.model.base_channels),
+            surface_hidden_dim=int(cfg.model.surface_hidden_dim),
+            dropout=float(cfg.model.dropout),
+            volume_norm=str(cfg.model.volume_norm),
+            use_clinical=use_clinical,
+            clinical_input_dim=int(getattr(cfg.model, "clinical_input_dim", 0)),
+            clinical_hidden_dim=int(getattr(cfg.model, "clinical_hidden_dim", 256)),
+            surface_refiner=str(getattr(cfg.model, "surface_refiner", "none")),
+            surface_refiner_hidden_dim=int(getattr(cfg.model, "surface_refiner_hidden_dim", 0)),
+            surface_refiner_dropout=float(getattr(cfg.model, "surface_refiner_dropout", 0.0)),
+            surface_refiner_residual_init=float(getattr(cfg.model, "surface_refiner_residual_init", 0.1)),
+            num_rois=int(cfg.model.num_rois),
         )
     return CortexWeaveROIClipTeacher(
         surface_in_channels=int(cfg.model.surface_in_channels),
@@ -129,7 +254,38 @@ def selection_score(metrics, name):
     return float(metrics["mcc"])
 
 
-def run_epoch(model, loader, optimizer, device, cfg, class_weights, train_mode, auxiliary_loss_scale=1.0):
+def teacher_roi_clip_loss(z_surface, z_volume, cfg, roi_affinity=None):
+    mode = str(getattr(cfg.training, "roi_clip_alignment_mode", "hard")).lower()
+    if mode in {"topology_soft", "anatomical_transport", "soft"}:
+        return anatomical_transport_roi_clip_loss(
+            z_surface,
+            z_volume,
+            roi_affinity=roi_affinity,
+            temperature=cfg.temperature.clip,
+            epsilon=float(getattr(cfg.training, "roi_clip_soft_epsilon", 0.1)),
+        )
+    if mode in {"distance_weighted", "weighted_negatives", "dnce"}:
+        return distance_weighted_roi_clip_loss(
+            z_surface,
+            z_volume,
+            roi_affinity=roi_affinity,
+            temperature=cfg.temperature.clip,
+            min_negative_weight=float(getattr(cfg.training, "roi_clip_min_negative_weight", 0.05)),
+        )
+    return roi_clip_loss(z_surface, z_volume, temperature=cfg.temperature.clip)
+
+
+def run_epoch(
+    model,
+    loader,
+    optimizer,
+    device,
+    cfg,
+    class_weights,
+    train_mode,
+    auxiliary_loss_scale=1.0,
+    roi_affinity=None,
+):
     model.train(train_mode)
     use_roi_branch = bool(cfg.model.use_roi_branch)
     total_meter = AverageMeter()
@@ -165,7 +321,12 @@ def run_epoch(model, loader, optimizer, device, cfg, class_weights, train_mode, 
             loss_proto = loss_ce.new_zeros(())
             loss_rel = loss_ce.new_zeros(())
             if use_roi_branch and auxiliary_loss_scale > 0.0 and "z_surface" in outputs and "z_volume" in outputs:
-                loss_clip = roi_clip_loss(outputs["z_surface"], outputs["z_volume"], temperature=cfg.temperature.clip)
+                loss_clip = teacher_roi_clip_loss(
+                    outputs["z_surface"],
+                    outputs["z_volume"],
+                    cfg=cfg,
+                    roi_affinity=roi_affinity,
+                )
                 loss_proto = (
                     prototype_loss(outputs["surface_prototype_logits"], batch["label"])
                     + prototype_loss(outputs["volume_prototype_logits"], batch["label"])
@@ -209,8 +370,17 @@ def run_epoch(model, loader, optimizer, device, cfg, class_weights, train_mode, 
     return metrics, losses
 
 
-def evaluate_teacher(model, loader, device, cfg):
-    metrics, losses = run_epoch(model, loader, optimizer=None, device=device, cfg=cfg, class_weights=None, train_mode=False)
+def evaluate_teacher(model, loader, device, cfg, roi_affinity=None):
+    metrics, losses = run_epoch(
+        model,
+        loader,
+        optimizer=None,
+        device=device,
+        cfg=cfg,
+        class_weights=None,
+        train_mode=False,
+        roi_affinity=roi_affinity,
+    )
     return metrics, losses
 
 
@@ -268,6 +438,11 @@ def main():
             f"val={len(val_loader.dataset)} ({len(val_loader)} steps) "
             f"test={len(test_loader.dataset)} ({len(test_loader)} steps)"
         )
+        roi_affinity = build_roi_clip_affinity(train_loader.dataset, cfg, logger=logger)
+        if roi_affinity is not None:
+            roi_affinity = roi_affinity.to(device)
+        else:
+            logger.print_message("Teacher ROI-CLIP alignment mode=hard (identity targets).")
         class_weights = compute_class_weights(
             train_loader.dataset,
             num_classes=int(cfg.model.num_classes),
@@ -299,6 +474,7 @@ def main():
                 class_weights,
                 train_mode=True,
                 auxiliary_loss_scale=auxiliary_loss_scale,
+                roi_affinity=roi_affinity,
             )
             train_elapsed = now() - train_start_time
             val_start_time = now()
@@ -311,6 +487,7 @@ def main():
                 class_weights=class_weights,
                 train_mode=False,
                 auxiliary_loss_scale=auxiliary_loss_scale,
+                roi_affinity=roi_affinity,
             )
             val_elapsed = now() - val_start_time
             epoch_elapsed = now() - epoch_start_time
@@ -360,7 +537,7 @@ def main():
         state = ckpt.load(map_location=device)
         model.load_state_dict(state["model"])
         test_start_time = now()
-        test_metrics, test_losses = evaluate_teacher(model, test_loader, device, cfg)
+        test_metrics, test_losses = evaluate_teacher(model, test_loader, device, cfg, roi_affinity=roi_affinity)
         test_elapsed = now() - test_start_time
         fold_elapsed = now() - fold_start_time
         logger.print_message(

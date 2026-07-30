@@ -39,6 +39,29 @@ def relation_distill_loss(teacher_relation, student_relation):
     return F.mse_loss(student_relation, teacher_relation.detach())
 
 
+def _weighted_relation_mse(teacher_relation, student_relation, weight):
+    teacher = teacher_relation.detach()
+    weight = weight.to(device=student_relation.device, dtype=student_relation.dtype)
+    weight = weight / weight.sum().clamp_min(1e-6)
+    return (((student_relation - teacher) ** 2) * weight.unsqueeze(0)).sum(dim=(1, 2)).mean()
+
+
+def multiscale_relation_distill_loss(
+    teacher_relation,
+    student_relation,
+    local_weight,
+    remote_weight,
+    local_scale=0.7,
+    remote_scale=0.3,
+):
+    local_scale = float(local_scale)
+    remote_scale = float(remote_scale)
+    normalizer = max(local_scale + remote_scale, 1e-6)
+    local_loss = _weighted_relation_mse(teacher_relation, student_relation, local_weight)
+    remote_loss = _weighted_relation_mse(teacher_relation, student_relation, remote_weight)
+    return (local_scale * local_loss + remote_scale * remote_loss) / normalizer
+
+
 def prototype_distill_loss(teacher_logits, student_logits, temperature=1.0):
     tau = max(float(temperature), 1e-6)
     teacher_prob = F.softmax(teacher_logits.detach() / tau, dim=-1)

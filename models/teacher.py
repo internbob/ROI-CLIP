@@ -5,7 +5,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .heads import GlobalClassifierHead, ROIClassifierHead
-from .clinical_encoder import ClinicalFeatureTokenizer, ClinicalGatedFusion, ImagingClinicalCrossTransformer
+from .clinical_encoder import (
+    ClinicalAtlasPromptFusion,
+    ClinicalFeatureTokenizer,
+    ClinicalGatedFusion,
+    ImagingClinicalCrossTransformer,
+)
 from .prototypes import DiseasePrototypeBank
 from .relation import pairwise_cosine_matrix
 from .roi_clip import ROIClipProjector
@@ -177,6 +182,121 @@ class MRIClinicalCLIPBaseline(nn.Module):
         }
 
 
+class SurfaceVolumeConcatBaseline(nn.Module):
+    """Directly concatenate cortical surface and voxel features for classification."""
+
+    def __init__(
+        self,
+        surface_in_channels,
+        feature_dim,
+        num_classes,
+        num_vertices,
+        base_channels=32,
+        surface_hidden_dim=128,
+        dropout=0.1,
+        volume_norm="batch",
+        use_clinical=False,
+        clinical_input_dim=0,
+        clinical_hidden_dim=256,
+        surface_refiner="none",
+        surface_refiner_hidden_dim=0,
+        surface_refiner_dropout=0.0,
+        surface_refiner_residual_init=0.1,
+        num_rois=62,
+    ):
+        super().__init__()
+        self.use_clinical = bool(use_clinical)
+        self.surface_encoder = SurfaceEncoder(
+            surface_in_channels,
+            surface_hidden_dim,
+            feature_dim,
+            num_vertices=num_vertices,
+        )
+        self.surface_refiner = build_surface_refiner(
+            name=surface_refiner,
+            num_rois=num_rois,
+            feature_dim=feature_dim,
+            hidden_dim=int(surface_refiner_hidden_dim) if int(surface_refiner_hidden_dim or 0) > 0 else None,
+            dropout=float(surface_refiner_dropout),
+            residual_init=float(surface_refiner_residual_init),
+        )
+        self.surface_pool = SurfaceROIPooling()
+        self.surface_summary = nn.Sequential(
+            nn.LayerNorm(feature_dim * 2),
+            nn.Linear(feature_dim * 2, feature_dim),
+            nn.GELU(),
+            nn.LayerNorm(feature_dim),
+        )
+        self.volume_encoder = SFCNVolumeEncoder3D(
+            in_channels=1,
+            base_channels=base_channels,
+            out_dim=feature_dim,
+            norm=volume_norm,
+        )
+        self.clinical_encoder = (
+            nn.Sequential(
+                nn.LayerNorm(int(clinical_input_dim)),
+                nn.Linear(int(clinical_input_dim), int(clinical_hidden_dim)),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(int(clinical_hidden_dim), feature_dim),
+                nn.LayerNorm(feature_dim),
+            )
+            if self.use_clinical and int(clinical_input_dim) > 0
+            else None
+        )
+        concat_dim = feature_dim * (3 if self.clinical_encoder is not None else 2)
+        self.classifier = nn.Sequential(
+            nn.LayerNorm(concat_dim),
+            nn.Linear(concat_dim, int(clinical_hidden_dim)),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(int(clinical_hidden_dim), num_classes),
+        )
+
+    def forward(
+        self,
+        image,
+        surface_data,
+        surface_roi_masks,
+        local_ribbon_masks,
+        roi_volume_masks,
+        labels=None,
+        clinical_data=None,
+    ):
+        del local_ribbon_masks, roi_volume_masks, labels
+        _, multi_scale_features, global_feat = self.volume_encoder(image)
+        surface_features = self.surface_encoder(surface_data)
+        surface_features = self.surface_refiner(surface_features, surface_roi_masks)
+        surface_tokens, surface_roi_weights = self.surface_pool(surface_features, surface_roi_masks)
+        surface_mean = surface_tokens.mean(dim=1)
+        surface_max = surface_tokens.max(dim=1).values
+        surface_global = self.surface_summary(torch.cat([surface_mean, surface_max], dim=-1))
+
+        features = [global_feat, surface_global]
+        clinical_feature = None
+        if self.clinical_encoder is not None:
+            if clinical_data is None:
+                raise ValueError("clinical_data is required when use_clinical=True")
+            clinical_feature = self.clinical_encoder(clinical_data.to(global_feat.device))
+            features.append(clinical_feature)
+        fused = torch.cat(features, dim=-1)
+        logits = self.classifier(fused)
+        return {
+            "logits": logits,
+            "global_logits": logits,
+            "roi_weight": logits.new_zeros(()),
+            "prob": torch.softmax(logits, dim=-1),
+            "surface_tokens": surface_tokens,
+            "surface_roi_weights": surface_roi_weights,
+            "surface_global_feat": surface_global,
+            "global_volume_feat": global_feat,
+            "fused_global_feat": fused,
+            "clinical_feature": clinical_feature,
+            "multi_scale_features": multi_scale_features,
+        }
+
+
 class CortexWeaveROIClipTeacher(nn.Module):
     def __init__(
         self,
@@ -209,7 +329,7 @@ class CortexWeaveROIClipTeacher(nn.Module):
         self.use_roi_branch = bool(use_roi_branch)
         self.use_clinical = bool(use_clinical)
         self.clinical_fusion_mode = str(clinical_fusion_mode).lower()
-        if self.clinical_fusion_mode not in {"gated", "cross"}:
+        if self.clinical_fusion_mode not in {"gated", "cross", "atlas_prompt"}:
             raise ValueError(f"Unsupported clinical fusion mode: {clinical_fusion_mode}")
         self.surface_encoder = SurfaceEncoder(surface_in_channels, surface_hidden_dim, feature_dim, num_vertices=num_vertices)
         self.surface_refiner = build_surface_refiner(
@@ -274,6 +394,19 @@ class CortexWeaveROIClipTeacher(nn.Module):
             if self.use_clinical and self.clinical_fusion_mode == "cross"
             else None
         )
+        self.clinical_atlas_prompt = (
+            ClinicalAtlasPromptFusion(
+                clinical_input_dim=int(clinical_input_dim),
+                feature_dim=feature_dim,
+                roi_dim=proj_dim,
+                num_rois=num_rois,
+                num_domain_prompts=max(2, int(clinical_num_layers) * 2),
+                num_heads=int(clinical_num_heads),
+                dropout=float(clinical_dropout),
+            )
+            if self.use_clinical and self.clinical_fusion_mode == "atlas_prompt"
+            else None
+        )
         roi_residual_init = min(max(float(roi_residual_init), 1e-4), 1.0 - 1e-4)
         self.roi_logit_scale = nn.Parameter(torch.tensor(math.log(roi_residual_init / (1.0 - roi_residual_init))))
 
@@ -291,6 +424,7 @@ class CortexWeaveROIClipTeacher(nn.Module):
         feat_map, multi_scale_features, global_feat = self.volume_encoder(image)
         if not self.use_roi_branch:
             cross_outputs = None
+            prompt_outputs = None
             clinical_feature = None
             clinical_gate = None
             if self.use_clinical:
@@ -303,13 +437,22 @@ class CortexWeaveROIClipTeacher(nn.Module):
                         clinical_data,
                     )
                     global_logits = self.global_head(fused_global_feat)
-                else:
+                elif self.clinical_fusion_mode == "cross":
                     cross_outputs = self.clinical_cross_fusion(
                         self.global_to_cross(global_feat).unsqueeze(1),
                         clinical_data,
                     )
                     fused_global_feat = cross_outputs["image_tokens"][:, 0]
                     global_logits = self.cross_global_head(fused_global_feat)
+                else:
+                    prompt_outputs = self.clinical_atlas_prompt(
+                        global_feature=global_feat,
+                        clinical_data=clinical_data,
+                    )
+                    fused_global_feat = prompt_outputs["global_feature"]
+                    clinical_feature = prompt_outputs["clinical_feature"]
+                    clinical_gate = prompt_outputs["clinical_gate"]
+                    global_logits = self.global_head(fused_global_feat)
             else:
                 fused_global_feat = global_feat
                 global_logits = self.global_head(global_feat)
@@ -324,13 +467,26 @@ class CortexWeaveROIClipTeacher(nn.Module):
                 "fused_global_feat": fused_global_feat,
                 "clinical_feature": clinical_feature,
                 "clinical_gate": clinical_gate,
-                "clinical_tokens": cross_outputs["clinical_tokens"] if cross_outputs is not None else None,
+                "clinical_tokens": (
+                    cross_outputs["clinical_tokens"]
+                    if cross_outputs is not None
+                    else prompt_outputs["clinical_tokens"]
+                    if prompt_outputs is not None
+                    else None
+                ),
                 "image_to_clinical_attention": (
                     cross_outputs["image_to_clinical_attention"] if cross_outputs is not None else None
                 ),
                 "clinical_to_image_attention": (
                     cross_outputs["clinical_to_image_attention"] if cross_outputs is not None else None
                 ),
+                "clinical_domain_prompts": (
+                    prompt_outputs["clinical_domain_prompts"] if prompt_outputs is not None else None
+                ),
+                "clinical_domain_attention": (
+                    prompt_outputs["clinical_domain_attention"] if prompt_outputs is not None else None
+                ),
+                "roi_prompt_attention": prompt_outputs["roi_prompt_attention"] if prompt_outputs is not None else None,
             }
 
         surface_features = self.surface_encoder(surface_data)
@@ -340,22 +496,37 @@ class CortexWeaveROIClipTeacher(nn.Module):
         volume_tokens, local_tokens, roi_tokens, aux = self.volume_pool(feat_map, local_ribbon_masks, roi_volume_masks)
 
         z_surface, z_volume, similarity_matrix = self.roi_clip(surface_tokens, volume_tokens)
-        z_teacher = self.teacher_fusion(torch.cat([z_surface, z_volume], dim=-1))
         cross_outputs = None
+        prompt_outputs = None
         clinical_feature = None
         clinical_gate = None
-        classifier_tokens = z_teacher
         if self.use_clinical:
             if clinical_data is None:
                 raise ValueError("clinical_data is required when use_clinical=True")
             clinical_data = clinical_data.to(global_feat.device)
+            if self.clinical_fusion_mode == "atlas_prompt":
+                prompt_outputs = self.clinical_atlas_prompt(
+                    global_feature=global_feat,
+                    clinical_data=clinical_data,
+                    volume_tokens=z_volume,
+                    surface_tokens=z_surface,
+                )
+                z_surface = prompt_outputs["surface_tokens"]
+                z_volume = prompt_outputs["volume_tokens"]
+                fused_global_feat = prompt_outputs["global_feature"]
+                clinical_feature = prompt_outputs["clinical_feature"]
+                clinical_gate = prompt_outputs["clinical_gate"]
+                global_logits = self.global_head(fused_global_feat)
+        z_teacher = self.teacher_fusion(torch.cat([z_surface, z_volume], dim=-1))
+        classifier_tokens = z_teacher
+        if self.use_clinical:
             if self.clinical_fusion_mode == "gated":
                 fused_global_feat, clinical_feature, clinical_gate = self.clinical_fusion(
                     global_feat,
                     clinical_data,
                 )
                 global_logits = self.global_head(fused_global_feat)
-            else:
+            elif self.clinical_fusion_mode == "cross":
                 imaging_tokens = torch.cat([self.global_to_cross(global_feat).unsqueeze(1), z_teacher], dim=1)
                 cross_outputs = self.clinical_cross_fusion(imaging_tokens, clinical_data)
                 fused_global_feat = cross_outputs["image_tokens"][:, 0]
@@ -401,12 +572,25 @@ class CortexWeaveROIClipTeacher(nn.Module):
             "clinical_feature": clinical_feature,
             "clinical_gate": clinical_gate,
             "cross_image_tokens": cross_outputs["image_tokens"] if cross_outputs is not None else None,
-            "clinical_tokens": cross_outputs["clinical_tokens"] if cross_outputs is not None else None,
+            "clinical_tokens": (
+                cross_outputs["clinical_tokens"]
+                if cross_outputs is not None
+                else prompt_outputs["clinical_tokens"]
+                if prompt_outputs is not None
+                else None
+            ),
             "image_to_clinical_attention": (
                 cross_outputs["image_to_clinical_attention"] if cross_outputs is not None else None
             ),
             "clinical_to_image_attention": (
                 cross_outputs["clinical_to_image_attention"] if cross_outputs is not None else None
             ),
+            "clinical_domain_prompts": (
+                prompt_outputs["clinical_domain_prompts"] if prompt_outputs is not None else None
+            ),
+            "clinical_domain_attention": (
+                prompt_outputs["clinical_domain_attention"] if prompt_outputs is not None else None
+            ),
+            "roi_prompt_attention": prompt_outputs["roi_prompt_attention"] if prompt_outputs is not None else None,
         }
         return outputs

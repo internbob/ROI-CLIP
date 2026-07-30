@@ -154,3 +154,121 @@ class ImagingClinicalCrossTransformer(nn.Module):
             "image_to_clinical_attention": image_attention,
             "clinical_to_image_attention": clinical_attention,
         }
+
+
+class ClinicalAtlasPromptFusion(nn.Module):
+    """Inject clinical prompts into global imaging features and ROI tokens."""
+
+    def __init__(
+        self,
+        clinical_input_dim,
+        feature_dim,
+        roi_dim,
+        num_rois,
+        num_domain_prompts=4,
+        num_heads=4,
+        dropout=0.1,
+    ):
+        super().__init__()
+        self.clinical_tokenizer = ClinicalFeatureTokenizer(clinical_input_dim, roi_dim)
+        self.domain_queries = nn.Parameter(torch.randn(1, int(num_domain_prompts), roi_dim) * 0.02)
+        self.domain_attention = nn.MultiheadAttention(
+            embed_dim=roi_dim,
+            num_heads=int(num_heads),
+            dropout=float(dropout),
+            batch_first=True,
+        )
+        self.roi_position = nn.Parameter(torch.randn(1, int(num_rois), roi_dim) * 0.02)
+        self.roi_prompt_attention = nn.MultiheadAttention(
+            embed_dim=roi_dim,
+            num_heads=int(num_heads),
+            dropout=float(dropout),
+            batch_first=True,
+        )
+        self.roi_update = nn.Sequential(
+            nn.LayerNorm(roi_dim),
+            nn.Linear(roi_dim, roi_dim),
+            nn.GELU(),
+            nn.Dropout(float(dropout)),
+            nn.Linear(roi_dim, roi_dim),
+        )
+        self.volume_gate = nn.Sequential(
+            nn.Linear(roi_dim * 2, roi_dim),
+            nn.GELU(),
+            nn.Dropout(float(dropout)),
+            nn.Linear(roi_dim, roi_dim),
+            nn.Sigmoid(),
+        )
+        self.surface_gate = nn.Sequential(
+            nn.Linear(roi_dim * 3, roi_dim),
+            nn.GELU(),
+            nn.Dropout(float(dropout)),
+            nn.Linear(roi_dim, roi_dim),
+            nn.Sigmoid(),
+        )
+        self.volume_norm = nn.LayerNorm(roi_dim)
+        self.surface_norm = nn.LayerNorm(roi_dim)
+        self.global_context = nn.Sequential(
+            nn.LayerNorm(roi_dim),
+            nn.Linear(roi_dim, feature_dim),
+            nn.GELU(),
+            nn.Dropout(float(dropout)),
+            nn.Linear(feature_dim, feature_dim),
+        )
+        self.global_gate = nn.Sequential(
+            nn.Linear(feature_dim * 2, feature_dim),
+            nn.Sigmoid(),
+        )
+        self.global_norm = nn.LayerNorm(feature_dim)
+
+    def forward(self, global_feature, clinical_data, volume_tokens=None, surface_tokens=None):
+        batch_size = global_feature.size(0)
+        clinical_tokens = self.clinical_tokenizer(clinical_data)
+        domain_queries = self.domain_queries.expand(batch_size, -1, -1)
+        domain_prompts, domain_attention = self.domain_attention(
+            query=domain_queries,
+            key=clinical_tokens,
+            value=clinical_tokens,
+            need_weights=True,
+            average_attn_weights=True,
+        )
+
+        clinical_feature = self.global_context(domain_prompts.mean(dim=1))
+        clinical_gate = self.global_gate(torch.cat([global_feature, clinical_feature], dim=-1))
+        fused_global_feature = self.global_norm(global_feature + clinical_gate * clinical_feature)
+
+        outputs = {
+            "global_feature": fused_global_feature,
+            "clinical_feature": clinical_feature,
+            "clinical_gate": clinical_gate,
+            "clinical_tokens": clinical_tokens,
+            "clinical_domain_prompts": domain_prompts,
+            "clinical_domain_attention": domain_attention,
+            "roi_prompt_attention": None,
+            "volume_tokens": volume_tokens,
+            "surface_tokens": surface_tokens,
+        }
+        if volume_tokens is None:
+            return outputs
+
+        if volume_tokens.size(1) > self.roi_position.size(1):
+            raise ValueError("ROI token count exceeds configured maximum")
+        query_tokens = volume_tokens if surface_tokens is None else 0.5 * (volume_tokens + surface_tokens)
+        query_tokens = query_tokens + self.roi_position[:, : query_tokens.size(1)]
+        roi_prompt_delta, roi_prompt_attention = self.roi_prompt_attention(
+            query=query_tokens,
+            key=domain_prompts,
+            value=domain_prompts,
+            need_weights=True,
+            average_attn_weights=True,
+        )
+        roi_update = self.roi_update(roi_prompt_delta)
+        volume_gate = self.volume_gate(torch.cat([volume_tokens, roi_update], dim=-1))
+        outputs["volume_tokens"] = self.volume_norm(volume_tokens + volume_gate * roi_update)
+        outputs["roi_prompt_attention"] = roi_prompt_attention
+
+        if surface_tokens is not None:
+            surface_gate = self.surface_gate(torch.cat([surface_tokens, volume_tokens, roi_update], dim=-1))
+            outputs["surface_tokens"] = self.surface_norm(surface_tokens + surface_gate * roi_update)
+
+        return outputs

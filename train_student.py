@@ -14,10 +14,12 @@ from losses import (
     attention_distill_loss,
     classification_loss,
     kd_logit_loss,
+    multiscale_relation_distill_loss,
     prototype_distill_loss,
     relation_distill_loss,
     token_distill_loss,
 )
+from data.ico_utils import get_ico_topology, infer_ico_level
 from metrics import AverageMeter, compute_classification_metrics, format_classification_metrics
 from models.student import MRIOnlyStudent
 from models.teacher import CortexWeaveROIClipTeacher
@@ -115,6 +117,8 @@ def initialize_student_from_teacher(student, teacher):
         student.cross_global_head.load_state_dict(teacher.cross_global_head.state_dict())
     if student.clinical_cross_fusion is not None and teacher.clinical_cross_fusion is not None:
         student.clinical_cross_fusion.load_state_dict(teacher.clinical_cross_fusion.state_dict())
+    if student.clinical_atlas_prompt is not None and teacher.clinical_atlas_prompt is not None:
+        student.clinical_atlas_prompt.load_state_dict(teacher.clinical_atlas_prompt.state_dict())
     student.projector.load_state_dict(teacher.roi_clip.volume_proj.state_dict())
     student.prototype_bank.prototypes.data.copy_(teacher.prototype_bank.prototypes.data)
 
@@ -132,6 +136,8 @@ def inherited_student_modules(student):
         modules.extend([student.global_to_cross, student.cross_global_head])
     if student.clinical_cross_fusion is not None:
         modules.append(student.clinical_cross_fusion)
+    if student.clinical_atlas_prompt is not None:
+        modules.append(student.clinical_atlas_prompt)
     return tuple(modules)
 
 
@@ -155,6 +161,8 @@ def build_student_optimizer(student, cfg):
         inherited_params += list(student.cross_global_head.parameters())
     if student.clinical_cross_fusion is not None:
         inherited_params += list(student.clinical_cross_fusion.parameters())
+    if student.clinical_atlas_prompt is not None:
+        inherited_params += list(student.clinical_atlas_prompt.parameters())
     inherited_ids = {id(param) for param in encoder_params + inherited_params}
     new_head_params = [param for param in student.parameters() if id(param) not in inherited_ids]
     return torch.optim.AdamW(
@@ -165,6 +173,113 @@ def build_student_optimizer(student, cfg):
         ],
         weight_decay=float(cfg.training.weight_decay),
     )
+
+
+def _roi_hemi_and_base(region_name, index, num_rois):
+    name = str(region_name or "").lower()
+    for prefix, hemi in [("lh_", "lh"), ("left_", "lh"), ("l_", "lh"), ("rh_", "rh"), ("right_", "rh"), ("r_", "rh")]:
+        if name.startswith(prefix):
+            return hemi, name[len(prefix):]
+    return ("lh" if int(index) < int(num_rois) // 2 else "rh"), name or f"roi_{int(index)}"
+
+
+def _load_reference_surface_roi_masks(dataset):
+    if getattr(dataset, "preprocess_cache_root", "") and getattr(dataset, "samples", None):
+        try:
+            cached = dataset._load_cached_inputs(dataset.samples[0])
+            if cached is not None:
+                return cached["surface_roi_masks"]
+        except Exception:
+            pass
+    sample = dataset[0]
+    return sample["surface_roi_masks"].detach().cpu().numpy()
+
+
+def build_relation_distill_weights(dataset, cfg, logger=None):
+    mode = str(getattr(cfg.training, "relation_distill_mode", "global")).lower()
+    if mode != "local_remote":
+        return None
+
+    num_rois = int(cfg.model.num_rois)
+    num_vertices = int(cfg.data.num_vertices)
+    per_hemi = max(1, num_vertices // 2)
+    ico_level = infer_ico_level(per_hemi)
+    hemi_coords, _ = get_ico_topology(ico_level)
+    hemi_coords = hemi_coords.astype(np.float32)
+    coords = np.concatenate([hemi_coords, hemi_coords], axis=0)
+    coords = coords / (np.linalg.norm(coords, axis=1, keepdims=True) + 1e-6)
+
+    roi_masks = np.asarray(_load_reference_surface_roi_masks(dataset), dtype=np.float32)
+    if roi_masks.shape[0] != num_rois or roi_masks.shape[1] != coords.shape[0]:
+        raise ValueError(
+            f"Cannot build relation weights: masks={roi_masks.shape}, expected=({num_rois}, {coords.shape[0]})"
+        )
+
+    centroids = []
+    for roi_idx in range(num_rois):
+        weights = roi_masks[roi_idx]
+        denom = float(weights.sum())
+        if denom <= 1e-6:
+            center = coords.mean(axis=0)
+        else:
+            center = (weights[:, None] * coords).sum(axis=0) / denom
+        center = center / (np.linalg.norm(center) + 1e-6)
+        centroids.append(center.astype(np.float32))
+    centroids = np.stack(centroids, axis=0)
+
+    region_names = list(getattr(dataset, "atlas_region_names", []))
+    if len(region_names) != num_rois:
+        region_names = [f"roi_{idx:02d}" for idx in range(num_rois)]
+    parts = [_roi_hemi_and_base(name, idx, num_rois) for idx, name in enumerate(region_names)]
+    hemis = np.asarray([part[0] for part in parts])
+    bases = np.asarray([part[1] for part in parts])
+    same_hemi = hemis[:, None] == hemis[None, :]
+    homology = (hemis[:, None] != hemis[None, :]) & (bases[:, None] == bases[None, :])
+
+    distance = np.linalg.norm(centroids[:, None, :] - centroids[None, :, :], axis=-1)
+    offdiag = ~np.eye(num_rois, dtype=bool)
+    within_distances = distance[same_hemi & offdiag]
+    sigma = float(getattr(cfg.training, "relation_distance_sigma", 0.0))
+    if sigma <= 0.0:
+        sigma = float(np.median(within_distances[within_distances > 1e-6])) if np.any(within_distances > 1e-6) else 1.0
+    sigma = max(sigma, 1e-6)
+
+    affinity = np.exp(-(distance ** 2) / (2.0 * sigma ** 2)).astype(np.float32)
+    affinity[~same_hemi] = 0.0
+    np.fill_diagonal(affinity, 0.0)
+
+    homology_weight = max(0.0, float(getattr(cfg.training, "relation_homology_weight", 1.0)))
+    local_score = affinity + homology_weight * homology.astype(np.float32)
+    np.fill_diagonal(local_score, 0.0)
+
+    topk = max(1, int(getattr(cfg.training, "relation_local_topk", 6)))
+    local_weight = np.zeros_like(local_score, dtype=np.float32)
+    for roi_idx in range(num_rois):
+        candidates = np.argsort(local_score[roi_idx])[::-1]
+        selected = [idx for idx in candidates if local_score[roi_idx, idx] > 0.0][:topk]
+        if selected:
+            local_weight[roi_idx, selected] = local_score[roi_idx, selected]
+    local_weight = np.maximum(local_weight, local_weight.T)
+
+    remote_weight = (1.0 - affinity).astype(np.float32) * offdiag.astype(np.float32)
+    remote_weight[local_weight > 0.0] = 0.0
+    if float(remote_weight.sum()) <= 1e-6:
+        remote_weight = offdiag.astype(np.float32)
+        remote_weight[local_weight > 0.0] = 0.0
+
+    if logger is not None:
+        local_edges = int(np.count_nonzero(local_weight))
+        remote_edges = int(np.count_nonzero(remote_weight))
+        logger.print_message(
+            "Relation distillation mode=local_remote "
+            f"local_topk={topk} sigma={sigma:.4f} homology_weight={homology_weight:.3f} "
+            f"local_edges={local_edges} remote_edges={remote_edges}"
+        )
+
+    return {
+        "local": torch.from_numpy(local_weight.astype(np.float32)),
+        "remote": torch.from_numpy(remote_weight.astype(np.float32)),
+    }
 
 
 def selection_score(metrics, name):
@@ -189,7 +304,7 @@ def locate_teacher_checkpoint(cfg, fold):
     raise FileNotFoundError("Teacher checkpoint not found. Set training.teacher_checkpoint or pass --checkpoint.")
 
 
-def run_epoch(student, teacher, loader, optimizer, device, cfg, class_weights, train_mode, warmup=False):
+def run_epoch(student, teacher, loader, optimizer, device, cfg, class_weights, train_mode, warmup=False, relation_weights=None):
     student.train(train_mode)
     if train_mode and warmup:
         # Frozen BatchNorm statistics must stay fixed during the head-only warmup.
@@ -220,6 +335,8 @@ def run_epoch(student, teacher, loader, optimizer, device, cfg, class_weights, t
                     labels=batch["label"],
                     clinical_data=batch["clinical_data"],
                 )
+                if bool(getattr(cfg.training, "control_shuffle_roi", False)):
+                    teacher_outputs = shuffle_teacher_roi_outputs(teacher_outputs)
             student_outputs = student(batch["image"], clinical_data=batch["clinical_data"])
 
             loss_ce = classification_loss(student_outputs["logits"], batch["label"], class_weights=class_weights)
@@ -240,7 +357,17 @@ def run_epoch(student, teacher, loader, optimizer, device, cfg, class_weights, t
             loss_attn = student_outputs["logits"].new_zeros(())
             if float(cfg.loss_weights.kd_attention) > 0.0:
                 loss_attn = attention_distill_loss(teacher_outputs["mask_attention"], student_outputs["attention_maps"])
-            loss_rel = relation_distill_loss(teacher_outputs["volume_relation"], student_outputs["relation"])
+            if relation_weights is not None:
+                loss_rel = multiscale_relation_distill_loss(
+                    teacher_outputs["volume_relation"],
+                    student_outputs["relation"],
+                    local_weight=relation_weights["local"],
+                    remote_weight=relation_weights["remote"],
+                    local_scale=float(getattr(cfg.training, "relation_local_weight", 0.7)),
+                    remote_scale=float(getattr(cfg.training, "relation_remote_weight", 0.3)),
+                )
+            else:
+                loss_rel = relation_distill_loss(teacher_outputs["volume_relation"], student_outputs["relation"])
             loss_proto = prototype_distill_loss(
                 teacher_outputs["volume_prototype_logits"],
                 student_outputs["prototype_logits"],
@@ -285,6 +412,54 @@ def run_epoch(student, teacher, loader, optimizer, device, cfg, class_weights, t
         "kd_prototype": proto_meter.avg,
     }
     return metrics, losses
+
+
+def shuffle_teacher_roi_outputs(outputs):
+    """Break anatomical ROI correspondence while preserving sample-level logits."""
+    shuffled = dict(outputs)
+    logits = outputs.get("logits")
+    device = logits.device if logits is not None else next(
+        value.device for value in outputs.values() if torch.is_tensor(value)
+    )
+    num_rois = None
+    for key in ("z_volume", "volume_prototype_logits", "volume_relation", "mask_attention"):
+        value = outputs.get(key)
+        if torch.is_tensor(value) and value.dim() >= 2:
+            num_rois = int(value.shape[1])
+            break
+    if not num_rois:
+        return shuffled
+    perm = torch.randperm(num_rois, device=device)
+    roi_tensor_keys = [
+        "surface_tokens",
+        "volume_tokens",
+        "local_tokens",
+        "roi_tokens",
+        "z_surface",
+        "z_volume",
+        "z_teacher",
+        "surface_prototype_logits",
+        "volume_prototype_logits",
+        "prototype_logits",
+        "mask_attention",
+        "surface_roi_weights",
+    ]
+    for key in roi_tensor_keys:
+        value = outputs.get(key)
+        if torch.is_tensor(value) and value.dim() >= 2 and int(value.shape[1]) == num_rois:
+            shuffled[key] = value[:, perm].contiguous()
+    relation_keys = ["surface_relation", "volume_relation", "relation", "similarity_matrix"]
+    for key in relation_keys:
+        value = outputs.get(key)
+        if torch.is_tensor(value) and value.dim() >= 3 and int(value.shape[1]) == num_rois and int(value.shape[2]) == num_rois:
+            shuffled[key] = value[:, perm][:, :, perm].contiguous()
+    cross_tokens = outputs.get("cross_image_tokens")
+    if torch.is_tensor(cross_tokens) and cross_tokens.dim() >= 3 and int(cross_tokens.shape[1]) == num_rois + 1:
+        shuffled["cross_image_tokens"] = torch.cat(
+            [cross_tokens[:, :1], cross_tokens[:, 1:][:, perm]],
+            dim=1,
+        ).contiguous()
+    return shuffled
 
 
 def export_predictions(student, loader, device, csv_path, dry_run=False):
@@ -358,12 +533,17 @@ def main():
             f"features={len(train_loader.dataset.clinical_features)} "
             f"input_dim={int(cfg.model.clinical_input_dim)}"
         )
-        teacher_ckpt_path = locate_teacher_checkpoint(cfg, fold)
-        logger.print_message(f"Teacher checkpoint: {teacher_ckpt_path}")
-
+        random_teacher_control = bool(getattr(cfg.training, "control_random_teacher", False))
+        shuffle_roi_control = bool(getattr(cfg.training, "control_shuffle_roi", False))
+        teacher_ckpt_path = "" if random_teacher_control else locate_teacher_checkpoint(cfg, fold)
+        logger.print_message(f"Teacher checkpoint: {teacher_ckpt_path or '[random untrained teacher control]'}")
+        logger.print_message(
+            f"Control flags: random_teacher={random_teacher_control} shuffle_roi={shuffle_roi_control}"
+        )
         teacher = build_teacher(cfg).to(device)
-        teacher_state = torch.load(teacher_ckpt_path, map_location=device)
-        teacher.load_state_dict(teacher_state["model"])
+        if not random_teacher_control:
+            teacher_state = torch.load(teacher_ckpt_path, map_location=device)
+            teacher.load_state_dict(teacher_state["model"])
         for param in teacher.parameters():
             param.requires_grad = False
 
@@ -371,7 +551,8 @@ def main():
         initialize_student_from_teacher(student, teacher)
         logger.print_message(
             f"Initialized student volume encoder, {str(getattr(cfg.model, 'clinical_fusion_mode', 'gated'))} "
-            "clinical fusion, global heads, volume projector, and prototypes from teacher."
+            "clinical fusion, global heads, volume projector, and prototypes from "
+            f"{'random teacher control' if random_teacher_control else 'teacher'}."
         )
         logger.print_message(f"Student parameters: {count_parameters(student)}")
 
@@ -389,6 +570,9 @@ def main():
             mode=str(cfg.training.class_weight_mode),
         )
         logger.print_message(f"Class weights: {class_weights}")
+        relation_weights = build_relation_distill_weights(train_loader.dataset, cfg, logger=logger)
+        if relation_weights is None:
+            logger.print_message("Relation distillation mode=global (original full-matrix MSE).")
 
         best_score = float("-inf")
         stale = 0
@@ -412,10 +596,21 @@ def main():
                 class_weights,
                 train_mode=True,
                 warmup=warmup,
+                relation_weights=relation_weights,
             )
             train_elapsed = now() - train_start_time
             val_start_time = now()
-            val_metrics, val_losses = run_epoch(student, teacher, val_loader, optimizer=None, device=device, cfg=cfg, class_weights=class_weights, train_mode=False)
+            val_metrics, val_losses = run_epoch(
+                student,
+                teacher,
+                val_loader,
+                optimizer=None,
+                device=device,
+                cfg=cfg,
+                class_weights=class_weights,
+                train_mode=False,
+                relation_weights=relation_weights,
+            )
             val_elapsed = now() - val_start_time
             epoch_elapsed = now() - epoch_start_time
             fold_train_seconds += train_elapsed
@@ -446,6 +641,7 @@ def main():
                         "config": dict(cfg),
                         "clinical_features": list(train_loader.dataset.clinical_features),
                         "clinical_stats": train_loader.dataset.clinical_stats,
+                        "relation_distill_mode": str(getattr(cfg.training, "relation_distill_mode", "global")),
                     }
                 )
                 logger.print_message("Saved new best student checkpoint.")
@@ -461,7 +657,17 @@ def main():
         state = ckpt.load(map_location=device)
         student.load_state_dict(state["model"])
         test_start_time = now()
-        test_metrics, test_losses = run_epoch(student, teacher, test_loader, optimizer=None, device=device, cfg=cfg, class_weights=class_weights, train_mode=False)
+        test_metrics, test_losses = run_epoch(
+            student,
+            teacher,
+            test_loader,
+            optimizer=None,
+            device=device,
+            cfg=cfg,
+            class_weights=class_weights,
+            train_mode=False,
+            relation_weights=relation_weights,
+        )
         test_elapsed = now() - test_start_time
         fold_elapsed = now() - fold_start_time
         logger.print_message(
