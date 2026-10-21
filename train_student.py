@@ -11,18 +11,22 @@ if ROOT not in sys.path:
 
 from data import build_dataloaders
 from losses import (
-    attention_distill_loss,
     classification_loss,
     kd_logit_loss,
     multiscale_relation_distill_loss,
     prototype_distill_loss,
     relation_distill_loss,
+    roi_attention_mass_loss,
+    roi_center_correspondence_loss,
+    roi_occupancy_loss,
+    roi_spatial_metrics,
+    spatial_attention_consistency_loss,
     token_distill_loss,
 )
 from data.ico_utils import get_ico_topology, infer_ico_level
 from metrics import AverageMeter, compute_classification_metrics, format_classification_metrics
 from models.student import MRIOnlyStudent
-from models.teacher import CortexWeaveROIClipTeacher
+from train_teacher import build_model as build_teacher_model, load_roi_graph_topology
 from options import Option
 from utils import (
     CheckpointIO,
@@ -57,36 +61,59 @@ def compute_class_weights(dataset, num_classes, mode="sqrt_balanced"):
 
 
 def build_teacher(cfg):
-    use_clinical = bool(getattr(cfg.model, "use_clinical", False))
-    return CortexWeaveROIClipTeacher(
-        surface_in_channels=int(getattr(cfg.model, "surface_in_channels", 3)),
-        feature_dim=int(cfg.model.feature_dim),
-        proj_dim=int(cfg.model.proj_dim),
-        num_rois=int(cfg.model.num_rois),
-        num_classes=int(cfg.model.num_classes),
-        num_vertices=int(cfg.data.num_vertices),
-        base_channels=int(cfg.model.base_channels),
-        surface_hidden_dim=int(getattr(cfg.model, "surface_hidden_dim", 128)),
-        dropout=float(cfg.model.dropout),
-        prototype_temperature=float(cfg.temperature.prototype),
-        roi_residual_init=float(cfg.model.roi_residual_init),
-        volume_norm=str(cfg.model.volume_norm),
-        use_clinical=use_clinical,
-        clinical_input_dim=int(getattr(cfg.model, "clinical_input_dim", 0)),
-        clinical_fusion_mode=str(getattr(cfg.model, "clinical_fusion_mode", "gated")),
-        clinical_hidden_dim=int(getattr(cfg.model, "clinical_hidden_dim", 256)),
-        clinical_dropout=float(getattr(cfg.model, "clinical_dropout", 0.1)),
-        clinical_num_heads=int(getattr(cfg.model, "clinical_num_heads", 4)),
-        clinical_num_layers=int(getattr(cfg.model, "clinical_num_layers", 2)),
-        surface_refiner=str(getattr(cfg.model, "surface_refiner", "none")),
-        surface_refiner_hidden_dim=int(getattr(cfg.model, "surface_refiner_hidden_dim", 0)),
-        surface_refiner_dropout=float(getattr(cfg.model, "surface_refiner_dropout", 0.0)),
-        surface_refiner_residual_init=float(getattr(cfg.model, "surface_refiner_residual_init", 0.1)),
+    return build_teacher_model(cfg)
+
+
+def build_topology_query_pe(cfg, topology):
+    query_cfg = getattr(cfg.model, "topology_query", {})
+    if not bool(getattr(query_cfg, "enabled", False)):
+        return None
+    anatomy = topology.get("anatomy_adjacency")
+    if anatomy is None:
+        raise ValueError("Topology-seeded queries require model.roi_graph.topology_path")
+    adjacency = anatomy.detach().cpu().to(torch.float64)
+    homology = topology.get("homology")
+    if bool(getattr(query_cfg, "include_homology", True)) and homology is not None:
+        adjacency = torch.maximum(adjacency, homology.detach().cpu().to(torch.float64))
+    adjacency = torch.maximum(adjacency, adjacency.T)
+    adjacency.fill_diagonal_(0.0)
+    degree = adjacency.sum(dim=1).clamp_min(1.0)
+    inv_sqrt = degree.rsqrt()
+    laplacian = torch.eye(adjacency.shape[0], dtype=torch.float64) - (
+        inv_sqrt[:, None] * adjacency * inv_sqrt[None, :]
     )
+    _, eigenvectors = torch.linalg.eigh(laplacian)
+    components = max(1, int(getattr(query_cfg, "components", 16)))
+    components = min(components, int(adjacency.shape[0]) - 1)
+    pe = eigenvectors[:, 1 : components + 1].to(torch.float32)
+    # Eigenvector signs are arbitrary. Fix them deterministically so the same
+    # template produces byte-stable query buffers across runs.
+    max_indices = pe.abs().argmax(dim=0)
+    signs = torch.sign(pe[max_indices, torch.arange(pe.shape[1])])
+    signs[signs == 0] = 1.0
+    return pe * signs
 
 
 def build_student(cfg):
-    use_clinical = bool(getattr(cfg.model, "use_clinical", False))
+    # Clinical variables are privileged teacher inputs. vNext students default
+    # to a strict image-only contract; legacy clinical students require opt-in.
+    use_clinical = bool(getattr(cfg.model, "student_use_clinical", False))
+    roi_graph_cfg = getattr(cfg.model, "roi_graph", {})
+    student_roi_graph_cfg = getattr(cfg.model, "student_roi_graph", {})
+    student_roi_graph_enabled = bool(
+        getattr(
+            student_roi_graph_cfg,
+            "enabled",
+            getattr(roi_graph_cfg, "enabled", False),
+        )
+    )
+    topology_query_cfg = getattr(cfg.model, "topology_query", {})
+    needs_topology = student_roi_graph_enabled or bool(
+        getattr(topology_query_cfg, "enabled", False)
+    )
+    topology = load_roi_graph_topology(cfg) if needs_topology else {}
+    topology_query_pe = build_topology_query_pe(cfg, topology)
+    backbone_cfg = getattr(cfg.model, "student_backbone", {})
     return MRIOnlyStudent(
         feature_dim=int(cfg.model.feature_dim),
         proj_dim=int(cfg.model.proj_dim),
@@ -104,6 +131,31 @@ def build_student(cfg):
         clinical_dropout=float(getattr(cfg.model, "clinical_dropout", 0.1)),
         clinical_num_heads=int(getattr(cfg.model, "clinical_num_heads", 4)),
         clinical_num_layers=int(getattr(cfg.model, "clinical_num_layers", 2)),
+        topology_query_pe=topology_query_pe,
+        topology_query_trainable_residual=bool(
+            getattr(getattr(cfg.model, "topology_query", {}), "trainable_residual", True)
+        ),
+        roi_graph_enabled=student_roi_graph_enabled,
+        roi_graph_num_layers=int(getattr(roi_graph_cfg, "num_layers", 1)),
+        roi_graph_num_heads=int(getattr(roi_graph_cfg, "num_heads", 4)),
+        roi_graph_dropout=float(getattr(roi_graph_cfg, "dropout", 0.1)),
+        roi_graph_residual_gate_init=float(getattr(roi_graph_cfg, "residual_gate_init", 0.1)),
+        roi_graph_use_boundary_strength=bool(getattr(roi_graph_cfg, "use_boundary_strength", False)),
+        roi_graph_use_homology=bool(getattr(roi_graph_cfg, "use_homology", False)),
+        roi_graph_anatomy_adjacency=topology.get("anatomy_adjacency"),
+        roi_graph_boundary_strength=topology.get("boundary_strength"),
+        roi_graph_evaluation_boundary_strength=topology.get("evaluation_boundary_strength"),
+        roi_graph_homology=topology.get("homology"),
+        roi_graph_evaluation_homology=topology.get("evaluation_homology"),
+        volume_encoder_name=str(getattr(backbone_cfg, "name", "sfcn")),
+        volume_encoder_pretrained_path=str(getattr(backbone_cfg, "pretrained_path", "") or ""),
+        volume_encoder_freeze_bn_stats=bool(getattr(backbone_cfg, "freeze_bn_stats", False)),
+        roi_classification_enabled=bool(
+            getattr(getattr(cfg.model, "student_roi_classifier", {}), "enabled", True)
+        ),
+        roi_classifier_use_raw_tokens=bool(
+            getattr(getattr(cfg.model, "student_roi_classifier", {}), "use_raw_tokens", False)
+        ),
     )
 
 
@@ -292,6 +344,9 @@ def selection_score(metrics, name):
 
 def locate_teacher_checkpoint(cfg, fold):
     candidates = []
+    template = str(getattr(cfg.training, "teacher_checkpoint_template", ""))
+    if template:
+        candidates.append(template.format(fold=int(fold)))
     if str(cfg.training.teacher_checkpoint):
         candidates.append(str(cfg.training.teacher_checkpoint))
     if str(getattr(cfg.runtime, "checkpoint", "")):
@@ -304,20 +359,61 @@ def locate_teacher_checkpoint(cfg, fold):
     raise FileNotFoundError("Teacher checkpoint not found. Set training.teacher_checkpoint or pass --checkpoint.")
 
 
+def student_loss_weight(cfg, vnext_name, legacy_name):
+    if bool(getattr(cfg.training, "vnext_graph_student", False)):
+        return float(getattr(cfg.loss_weights, vnext_name, 0.0))
+    return float(getattr(cfg.loss_weights, legacy_name, 0.0))
+
+
+def distillation_enabled(cfg):
+    if bool(getattr(cfg.training, "vnext_graph_student", False)):
+        return any(
+            student_loss_weight(cfg, vnext_name, legacy_name) > 0.0
+            for vnext_name, legacy_name in [
+                ("vnext_kd_logit", "kd_logit"),
+                ("vnext_kd_roi", "kd_token"),
+                ("vnext_kd_graph", "kd_relation"),
+                ("vnext_kd_prototype", "kd_prototype"),
+            ]
+        )
+    names = [
+        "kd_logit",
+        "kd_roi",
+        "kd_token",
+        "kd_graph",
+        "kd_relation",
+        "kd_prototype",
+        "kd_attention",
+        "roi_attention_mass",
+        "roi_occupancy",
+        "roi_center",
+    ]
+    return any(float(getattr(cfg.loss_weights, name, 0.0)) > 0.0 for name in names)
+
+
 def run_epoch(student, teacher, loader, optimizer, device, cfg, class_weights, train_mode, warmup=False, relation_weights=None):
     student.train(train_mode)
     if train_mode and warmup:
         # Frozen BatchNorm statistics must stay fixed during the head-only warmup.
         for module in inherited_student_modules(student):
             module.eval()
-    teacher.eval()
+    if teacher is not None:
+        teacher.eval()
     total_meter = AverageMeter()
     ce_meter = AverageMeter()
     logit_meter = AverageMeter()
     token_meter = AverageMeter()
     attn_meter = AverageMeter()
+    roi_mass_meter = AverageMeter()
+    roi_occupancy_meter = AverageMeter()
+    roi_center_meter = AverageMeter()
     rel_meter = AverageMeter()
     proto_meter = AverageMeter()
+    spatial_metric_meters = {
+        "roi_attention_mass": AverageMeter(),
+        "roi_soft_dice": AverageMeter(),
+        "roi_center_distance": AverageMeter(),
+    }
     all_labels = []
     all_probs = []
 
@@ -325,24 +421,52 @@ def run_epoch(student, teacher, loader, optimizer, device, cfg, class_weights, t
     with context:
         for batch_idx, batch in enumerate(loader):
             batch = move_to_device(batch, device)
-            with torch.no_grad():
-                teacher_outputs = teacher(
-                    image=batch["image"],
-                    surface_data=batch["surface_data"],
-                    surface_roi_masks=batch["surface_roi_masks"],
-                    local_ribbon_masks=batch["local_ribbon_masks"],
-                    roi_volume_masks=batch["roi_volume_masks"],
-                    labels=batch["label"],
-                    clinical_data=batch["clinical_data"],
-                )
-                if bool(getattr(cfg.training, "control_shuffle_roi", False)):
-                    teacher_outputs = shuffle_teacher_roi_outputs(teacher_outputs)
-            student_outputs = student(batch["image"], clinical_data=batch["clinical_data"])
+            teacher_outputs = None
+            if teacher is not None:
+                with torch.no_grad():
+                    teacher_inputs = dict(
+                        image=batch["image"],
+                        surface_data=batch["surface_data"],
+                        surface_roi_masks=batch["surface_roi_masks"],
+                        local_ribbon_masks=batch["local_ribbon_masks"],
+                        roi_volume_masks=batch["roi_volume_masks"],
+                        labels=batch["label"],
+                        clinical_data=batch["clinical_data"],
+                    )
+                    if (
+                        str(getattr(getattr(cfg.model, "volume_pooling", {}), "mode", "legacy_mask")).lower()
+                        in {"ribbon", "hybrid_ribbon"}
+                        or bool(getattr(getattr(cfg.model, "cross_geometry", {}), "enabled", False))
+                    ):
+                        teacher_inputs.update(
+                            ribbon_grid=batch["ribbon_grid"],
+                            ribbon_valid_mask=batch["ribbon_valid_mask"],
+                            vertex_valid_mask=batch["vertex_valid_mask"],
+                            vertex_roi_index=batch["vertex_roi_index"],
+                        )
+                    teacher_outputs = teacher(**teacher_inputs)
+                    if bool(getattr(cfg.training, "control_shuffle_roi", False)):
+                        teacher_outputs = shuffle_teacher_roi_outputs(teacher_outputs)
+            if bool(getattr(cfg.model, "student_use_clinical", False)):
+                student_outputs = student(batch["image"], clinical_data=batch["clinical_data"])
+            else:
+                student_outputs = student(batch["image"])
 
             loss_ce = classification_loss(student_outputs["logits"], batch["label"], class_weights=class_weights)
-            loss_logit = kd_logit_loss(teacher_outputs["logits"], student_outputs["logits"], temperature=cfg.temperature.kd)
-            loss_token = token_distill_loss(teacher_outputs["z_volume"], student_outputs["z_student"])
-            if teacher_outputs.get("cross_image_tokens") is not None:
+            spatial_zero = student_outputs["logits"].new_zeros(())
+            loss_logit = spatial_zero
+            loss_token = spatial_zero
+            loss_rel = spatial_zero
+            loss_proto = spatial_zero
+            if teacher_outputs is not None:
+                loss_logit = kd_logit_loss(
+                    teacher_outputs["logits"], student_outputs["logits"], temperature=cfg.temperature.kd
+                )
+                teacher_roi_target = teacher_outputs.get("z_teacher_graph", teacher_outputs["z_volume"])
+                loss_token = token_distill_loss(
+                    teacher_roi_target, student_outputs["z_student_graph"]
+                )
+            if teacher_outputs is not None and teacher_outputs.get("cross_image_tokens") is not None:
                 loss_token = (
                     loss_token
                     + token_distill_loss(
@@ -354,32 +478,55 @@ def run_epoch(student, teacher, loader, optimizer, device, cfg, class_weights, t
                         student_outputs["clinical_tokens"],
                     )
                 ) / 3.0
-            loss_attn = student_outputs["logits"].new_zeros(())
-            if float(cfg.loss_weights.kd_attention) > 0.0:
-                loss_attn = attention_distill_loss(teacher_outputs["mask_attention"], student_outputs["attention_maps"])
-            if relation_weights is not None:
+            roi_target = teacher_outputs.get("roi_occupancy") if teacher_outputs is not None else None
+            loss_attn = spatial_zero
+            if roi_target is not None and float(getattr(cfg.loss_weights, "kd_attention", 0.0)) > 0.0:
+                loss_attn = spatial_attention_consistency_loss(
+                    student_outputs["attention_maps"],
+                    teacher_outputs["roi_mask_attention"],
+                )
+            loss_roi_mass = spatial_zero
+            if roi_target is not None and float(getattr(cfg.loss_weights, "roi_attention_mass", 0.0)) > 0.0:
+                loss_roi_mass = roi_attention_mass_loss(student_outputs["attention_maps"], roi_target)
+            loss_roi_occupancy = spatial_zero
+            if roi_target is not None and float(getattr(cfg.loss_weights, "roi_occupancy", 0.0)) > 0.0:
+                loss_roi_occupancy = roi_occupancy_loss(student_outputs["spatial_logits"], roi_target)
+            loss_roi_center = spatial_zero
+            if roi_target is not None and float(getattr(cfg.loss_weights, "roi_center", 0.0)) > 0.0:
+                loss_roi_center = roi_center_correspondence_loss(student_outputs["attention_maps"], roi_target)
+            if teacher_outputs is not None and relation_weights is not None:
                 loss_rel = multiscale_relation_distill_loss(
-                    teacher_outputs["volume_relation"],
+                    teacher_outputs["relation"],
                     student_outputs["relation"],
                     local_weight=relation_weights["local"],
                     remote_weight=relation_weights["remote"],
                     local_scale=float(getattr(cfg.training, "relation_local_weight", 0.7)),
                     remote_scale=float(getattr(cfg.training, "relation_remote_weight", 0.3)),
                 )
-            else:
-                loss_rel = relation_distill_loss(teacher_outputs["volume_relation"], student_outputs["relation"])
-            loss_proto = prototype_distill_loss(
-                teacher_outputs["volume_prototype_logits"],
-                student_outputs["prototype_logits"],
-                temperature=1.0,
+            elif teacher_outputs is not None:
+                loss_rel = relation_distill_loss(teacher_outputs["relation"], student_outputs["relation"])
+            if teacher_outputs is not None:
+                loss_proto = prototype_distill_loss(
+                    teacher_outputs["prototype_logits"],
+                    student_outputs["prototype_logits"],
+                    temperature=1.0,
+                )
+            kd_logit_weight = student_loss_weight(cfg, "vnext_kd_logit", "kd_logit")
+            kd_roi_weight = student_loss_weight(cfg, "vnext_kd_roi", "kd_token")
+            kd_graph_weight = student_loss_weight(cfg, "vnext_kd_graph", "kd_relation")
+            kd_prototype_weight = student_loss_weight(
+                cfg, "vnext_kd_prototype", "kd_prototype"
             )
             total_loss = (
                 float(cfg.loss_weights.ce) * loss_ce
-                + float(cfg.loss_weights.kd_logit) * loss_logit
-                + float(cfg.loss_weights.kd_token) * loss_token
+                + kd_logit_weight * loss_logit
+                + kd_roi_weight * loss_token
                 + float(cfg.loss_weights.kd_attention) * loss_attn
-                + float(cfg.loss_weights.kd_relation) * loss_rel
-                + float(cfg.loss_weights.kd_prototype) * loss_proto
+                + kd_graph_weight * loss_rel
+                + kd_prototype_weight * loss_proto
+                + float(getattr(cfg.loss_weights, "roi_attention_mass", 0.0)) * loss_roi_mass
+                + float(getattr(cfg.loss_weights, "roi_occupancy", 0.0)) * loss_roi_occupancy
+                + float(getattr(cfg.loss_weights, "roi_center", 0.0)) * loss_roi_center
             )
 
             if train_mode:
@@ -393,8 +540,22 @@ def run_epoch(student, teacher, loader, optimizer, device, cfg, class_weights, t
             logit_meter.update(loss_logit.item(), batch_size)
             token_meter.update(loss_token.item(), batch_size)
             attn_meter.update(loss_attn.item(), batch_size)
+            roi_mass_meter.update(loss_roi_mass.item(), batch_size)
+            roi_occupancy_meter.update(loss_roi_occupancy.item(), batch_size)
+            roi_center_meter.update(loss_roi_center.item(), batch_size)
             rel_meter.update(loss_rel.item(), batch_size)
             proto_meter.update(loss_proto.item(), batch_size)
+            spatial_metrics = (
+                roi_spatial_metrics(
+                    student_outputs["attention_maps"],
+                    student_outputs["spatial_logits"],
+                    roi_target,
+                )
+                if roi_target is not None
+                else {name: 0.0 for name in spatial_metric_meters}
+            )
+            for name, value in spatial_metrics.items():
+                spatial_metric_meters[name].update(value, batch_size)
             all_labels.extend(batch["label"].detach().cpu().tolist())
             all_probs.extend(student_outputs["prob"].detach().cpu().tolist())
 
@@ -408,9 +569,13 @@ def run_epoch(student, teacher, loader, optimizer, device, cfg, class_weights, t
         "kd_logit": logit_meter.avg,
         "kd_token": token_meter.avg,
         "kd_attention": attn_meter.avg,
+        "roi_attention_mass_loss": roi_mass_meter.avg,
+        "roi_occupancy_loss": roi_occupancy_meter.avg,
+        "roi_center_loss": roi_center_meter.avg,
         "kd_relation": rel_meter.avg,
         "kd_prototype": proto_meter.avg,
     }
+    losses.update({name: meter.avg for name, meter in spatial_metric_meters.items()})
     return metrics, losses
 
 
@@ -422,7 +587,14 @@ def shuffle_teacher_roi_outputs(outputs):
         value.device for value in outputs.values() if torch.is_tensor(value)
     )
     num_rois = None
-    for key in ("z_volume", "volume_prototype_logits", "volume_relation", "mask_attention"):
+    for key in (
+        "z_volume",
+        "volume_prototype_logits",
+        "volume_relation",
+        "mask_attention",
+        "roi_mask_attention",
+        "roi_occupancy",
+    ):
         value = outputs.get(key)
         if torch.is_tensor(value) and value.dim() >= 2:
             num_rois = int(value.shape[1])
@@ -442,6 +614,9 @@ def shuffle_teacher_roi_outputs(outputs):
         "volume_prototype_logits",
         "prototype_logits",
         "mask_attention",
+        "local_mask_attention",
+        "roi_mask_attention",
+        "roi_occupancy",
         "surface_roi_weights",
     ]
     for key in roi_tensor_keys:
@@ -468,7 +643,10 @@ def export_predictions(student, loader, device, csv_path, dry_run=False):
     with torch.no_grad():
         for batch in loader:
             batch = move_to_device(batch, device)
-            outputs = student(batch["image"], clinical_data=batch["clinical_data"])
+            if bool(getattr(student, "use_clinical", False)):
+                outputs = student(batch["image"], clinical_data=batch["clinical_data"])
+            else:
+                outputs = student(batch["image"])
             probs = outputs["prob"].detach().cpu().numpy()
             preds = probs.argmax(axis=1)
             labels = batch["label"].detach().cpu().numpy()
@@ -510,7 +688,15 @@ def main():
         fold_start_time = now()
         fold_dir = os.path.join(expr_dir, f"fold_{fold}")
         logger = Logger(fold_dir)
-        train_loader, val_loader, test_loader = build_dataloaders(cfg, fold=fold, require_teacher_inputs=True)
+        needs_teacher = distillation_enabled(cfg)
+        train_loader, val_loader, test_loader = build_dataloaders(
+            cfg,
+            fold=fold,
+            require_teacher_inputs=needs_teacher,
+            filter_teacher_available=bool(
+                getattr(cfg.training, "match_teacher_available", needs_teacher)
+            ),
+        )
         logger.print_message(
             f"Atlas mode={bool(getattr(getattr(cfg.data, 'atlas', {}), 'enabled', False))} "
             f"atlas_name={str(getattr(getattr(cfg.data, 'atlas', {}), 'name', 'none'))} "
@@ -525,43 +711,82 @@ def main():
         logger.print_message(
             f"Fold {fold} sizes: train={len(train_loader.dataset)} ({len(train_loader)} steps) "
             f"val={len(val_loader.dataset)} ({len(val_loader)} steps) "
-            f"test={len(test_loader.dataset)} ({len(test_loader)} steps)"
+            + (
+                f"test={len(test_loader.dataset)} ({len(test_loader)} steps)"
+                if test_loader is not None
+                else "test=NOT_LOADED (development-only)"
+            )
         )
         logger.print_message(
-            f"Clinical fusion enabled={bool(getattr(cfg.model, 'use_clinical', False))} "
+            f"Teacher clinical enabled={bool(getattr(cfg.model, 'use_clinical', False))} "
+            f"student clinical enabled={bool(getattr(cfg.model, 'student_use_clinical', False))} "
             f"mode={str(getattr(cfg.model, 'clinical_fusion_mode', 'gated'))} "
             f"features={len(train_loader.dataset.clinical_features)} "
             f"input_dim={int(cfg.model.clinical_input_dim)}"
         )
         random_teacher_control = bool(getattr(cfg.training, "control_random_teacher", False))
         shuffle_roi_control = bool(getattr(cfg.training, "control_shuffle_roi", False))
-        teacher_ckpt_path = "" if random_teacher_control else locate_teacher_checkpoint(cfg, fold)
-        logger.print_message(f"Teacher checkpoint: {teacher_ckpt_path or '[random untrained teacher control]'}")
+        teacher_ckpt_path = ""
+        if needs_teacher and not random_teacher_control:
+            teacher_ckpt_path = locate_teacher_checkpoint(cfg, fold)
+        teacher_label = (
+            teacher_ckpt_path
+            if teacher_ckpt_path
+            else "[random untrained teacher control]"
+            if needs_teacher
+            else "[not used]"
+        )
+        logger.print_message(f"Teacher checkpoint: {teacher_label}")
         logger.print_message(
             f"Control flags: random_teacher={random_teacher_control} shuffle_roi={shuffle_roi_control}"
         )
-        teacher = build_teacher(cfg).to(device)
-        if not random_teacher_control:
-            teacher_state = torch.load(teacher_ckpt_path, map_location=device)
-            teacher.load_state_dict(teacher_state["model"])
-        for param in teacher.parameters():
-            param.requires_grad = False
+        teacher = None
+        if needs_teacher:
+            teacher = build_teacher(cfg).to(device)
+            if not random_teacher_control:
+                teacher_state = torch.load(teacher_ckpt_path, map_location=device)
+                teacher.load_state_dict(teacher_state["model"])
+            for param in teacher.parameters():
+                param.requires_grad = False
 
+        # Teacher construction and graph-on/off variants consume different
+        # amounts of RNG.  Re-seed here so every matched variant starts its
+        # Student from the same per-fold common initialization.
+        seed_everything(int(cfg.training.seed) + int(fold))
         student = build_student(cfg).to(device)
-        initialize_student_from_teacher(student, teacher)
+        pretrained_report = getattr(student.volume_encoder, "pretrained_report", None)
         logger.print_message(
-            f"Initialized student volume encoder, {str(getattr(cfg.model, 'clinical_fusion_mode', 'gated'))} "
-            "clinical fusion, global heads, volume projector, and prototypes from "
-            f"{'random teacher control' if random_teacher_control else 'teacher'}."
+            f"Student volume encoder={student.volume_encoder_name} "
+            f"pretrained={bool(pretrained_report and pretrained_report.get('loaded', False))} "
+            f"loaded_tensors={int(pretrained_report.get('loaded_tensors', 0)) if pretrained_report else 0} "
+            f"freeze_bn_stats={bool(getattr(student.volume_encoder, 'freeze_bn_stats', False))}"
         )
+        initialize_from_teacher = bool(getattr(cfg.training, "initialize_from_teacher", False))
+        if initialize_from_teacher:
+            if teacher is None:
+                raise ValueError("initialize_from_teacher=true requires a distillation teacher")
+            initialize_student_from_teacher(student, teacher)
+        logger.print_message(f"Student initialized_from_teacher={initialize_from_teacher}")
         logger.print_message(f"Student parameters: {count_parameters(student)}")
 
         warmup_epochs = max(0, min(int(cfg.training.warmup_epochs), int(cfg.training.epochs)))
+        if not initialize_from_teacher and warmup_epochs > 0:
+            raise ValueError(
+                "warmup_epochs > 0 freezes randomly initialized MRI modules when "
+                "initialize_from_teacher=false; use warmup_epochs=0 for a valid scratch/KD comparison"
+            )
         set_inherited_trainable(student, trainable=warmup_epochs == 0)
         optimizer = build_student_optimizer(student, cfg)
         logger.print_message(
             f"Student schedule: warmup_epochs={warmup_epochs} encoder_lr={float(cfg.training.encoder_lr):.2e} "
             f"inherited_lr={float(cfg.training.inherited_lr):.2e} head_lr={float(cfg.training.lr):.2e}"
+        )
+        logger.print_message(
+            "Spatial supervision weights: "
+            f"attention_mass={float(getattr(cfg.loss_weights, 'roi_attention_mass', 0.0)):.4f} "
+            f"occupancy={float(getattr(cfg.loss_weights, 'roi_occupancy', 0.0)):.4f} "
+            f"attention_consistency={float(getattr(cfg.loss_weights, 'kd_attention', 0.0)):.4f} "
+            f"center={float(getattr(cfg.loss_weights, 'roi_center', 0.0)):.4f}"
         )
         ckpt = CheckpointIO(os.path.join(fold_dir, "best_student.pt"))
         class_weights = compute_class_weights(
@@ -621,6 +846,10 @@ def main():
                 f"train_loss={train_losses['loss']:.4f} val_loss={val_losses['loss']:.4f} "
                 f"train_ce={train_losses['ce']:.4f} train_kd_logit={train_losses['kd_logit']:.4f} "
                 f"train_kd_token={train_losses['kd_token']:.4f} train_kd_proto={train_losses['kd_prototype']:.4f} "
+                f"train_spatial_mass={train_losses['roi_attention_mass_loss']:.4f} "
+                f"train_spatial_occ={train_losses['roi_occupancy_loss']:.4f} "
+                f"train_spatial_attn={train_losses['kd_attention']:.4f} "
+                f"train_spatial_center={train_losses['roi_center_loss']:.4f} "
                 f"roi_weight={float(torch.sigmoid(student.roi_logit_scale).detach()):.4f} "
                 f"{format_classification_metrics(val_metrics, prefix='val_')} "
                 f"train_time={format_duration(train_elapsed)} val_time={format_duration(val_elapsed)} "
@@ -656,11 +885,13 @@ def main():
 
         state = ckpt.load(map_location=device)
         student.load_state_dict(state["model"])
-        test_start_time = now()
-        test_metrics, test_losses = run_epoch(
+        evaluation_loader = test_loader if test_loader is not None else val_loader
+        evaluation_name = "test" if test_loader is not None else "development validation"
+        evaluation_start_time = now()
+        evaluation_metrics, evaluation_losses = run_epoch(
             student,
             teacher,
-            test_loader,
+            evaluation_loader,
             optimizer=None,
             device=device,
             cfg=cfg,
@@ -668,40 +899,54 @@ def main():
             train_mode=False,
             relation_weights=relation_weights,
         )
-        test_elapsed = now() - test_start_time
+        evaluation_elapsed = now() - evaluation_start_time
         fold_elapsed = now() - fold_start_time
         logger.print_message(
-            f"Fold {fold} test: loss={test_losses['loss']:.4f} "
-            f"{format_classification_metrics(test_metrics)} "
+            f"Fold {fold} {evaluation_name}: loss={evaluation_losses['loss']:.4f} "
+            f"{format_classification_metrics(evaluation_metrics)} "
             f"train_total_time={format_duration(fold_train_seconds)} "
             f"val_total_time={format_duration(fold_val_seconds)} "
-            f"test_time={format_duration(test_elapsed)} fold_total_time={format_duration(fold_elapsed)}"
+            f"evaluation_time={format_duration(evaluation_elapsed)} fold_total_time={format_duration(fold_elapsed)}; "
+            f"held-out test evaluated={test_loader is not None}"
         )
+        metrics_filename = "test_metrics.json" if test_loader is not None else "development_metrics.json"
         logger.save_json(
             {
-                "metrics": test_metrics,
-                "losses": test_losses,
+                "best_epoch": int(state["epoch"]),
+                "metrics": evaluation_metrics,
+                "losses": evaluation_losses,
+                "held_out_test_evaluated": bool(test_loader is not None),
                 "timing": {
                     "train_total_seconds": fold_train_seconds,
                     "val_total_seconds": fold_val_seconds,
-                    "test_seconds": test_elapsed,
+                    "evaluation_seconds": evaluation_elapsed,
                     "fold_total_seconds": fold_elapsed,
                 },
             },
-            "test_metrics.json",
+            metrics_filename,
         )
         export_predictions(
             student,
-            test_loader,
+            evaluation_loader,
             device,
-            os.path.join(fold_dir, "test_predictions.csv"),
+            os.path.join(
+                fold_dir,
+                "test_predictions.csv" if test_loader is not None else "validation_predictions.csv",
+            ),
             dry_run=bool(cfg.runtime.dry_run),
         )
-        results.append(test_metrics)
+        results.append(evaluation_metrics)
 
     if results:
         summary = summarize_metric_results(results)
-        root_logger.save_json({"fold_metrics": results, "summary": summary}, "crossval_summary.json")
+        root_logger.save_json(
+            {
+                "fold_metrics": results,
+                "summary": summary,
+                "held_out_test_evaluated": bool(getattr(cfg.runtime, "evaluate_test", True)),
+            },
+            "crossval_summary.json",
+        )
         root_logger.print_message(f"Final mean+/-std {format_metric_summary(summary)}")
 
 

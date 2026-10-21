@@ -1,0 +1,11 @@
+experiment_name: "CortexBridge-vNext-Phase1-Ribbon"
+model:
+  method: "cortexbridge-vnext-phase1-ribbon"
+  volume_pooling:
+    mode: "ribbon"
+  ribbon:
+    num_depths: 5
+    depths: [0.0, 0.25, 0.5, 0.75, 1.0]
+    depth_attention: true
+runtime:
+  fold: 0

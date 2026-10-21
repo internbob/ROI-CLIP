@@ -1,0 +1,14 @@
+experiment_name: "CortexBridge-vNext-Phase1.1-E3-Hybrid"
+model:
+  method: "cortexbridge-vnext-phase1.1-e3-hybrid"
+  volume_pooling:
+    mode: "hybrid_ribbon"
+  ribbon:
+    num_depths: 5
+    depths: [0.2, 0.35, 0.5, 0.65, 0.8]
+    depth_attention: false
+    feature_stage: "high_res"
+    gate_init: 0.1
+runtime:
+  fold: 0
+  evaluate_test: false

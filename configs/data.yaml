@@ -1,0 +1,56 @@
+data:
+  surface_root: "/public_bme/data/zhouwl2023/ADNI/BrainSurf_Results"
+  split_root: "/home_data/home/zhouwl2023/project/Cortexbridge/cortexweave_roiclip/lookupcsv-full-huashan-adni-teacher-clean"
+  label_csv: ""
+  task: "COG"
+  allowed_subject_prefixes: ["sub-ADNI"]
+  num_vertices: 5124
+  mri_shape: [160, 192, 160]
+  normalize_surface: true
+  roi_bundle_name: "roi_bundle.npz"
+  preprocess_cache_root: "/home_data/home/zhouwl2023/Data/CortexWeave_ROIClip_cache/adni_dktatlas_5124_roi20x24x20_affine_v3"
+  ribbon_cache_root: "/home_data/home/zhouwl2023/Data/CortexWeave_ROIClip_cache/adni_dktatlas_5124_ribbon_v1"
+  allow_unaligned_control: false
+  roi_cache_shape: [20, 24, 20]
+  atlas:
+    enabled: true
+    name: "DKTatlas"
+  clinical:
+    enabled: true
+    features:
+      - age
+      - education
+      - apoe
+      - animal
+      - gds
+      - lm_imm
+      - lm_del
+      - faq_BILLS
+      - faq_TAXES
+      - faq_SHOPPING
+      - faq_GAMES
+      - faq_STOVE
+      - faq_MEALPREP
+      - faq_EVENTS
+      - faq_PAYATTN
+      - faq_REMDATES
+      - faq_TRAVEL
+      - npiq_DEL
+      - npiq_HALL
+      - npiq_AGIT
+      - npiq_DEPD
+      - npiq_ANX
+      - npiq_ELAT
+      - npiq_APA
+      - npiq_DISN
+      - npiq_IRR
+      - npiq_MOT
+      - npiq_NITE
+      - npiq_APP
+  mri_aug:
+    prob: 0.5
+    max_voxel_shift: 0
+    intensity_scale: 0.1
+    intensity_shift: 0.05
+    gamma: 0.1
+    noise_std: 0.01

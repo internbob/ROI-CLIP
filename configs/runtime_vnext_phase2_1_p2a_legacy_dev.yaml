@@ -1,0 +1,10 @@
+experiment_name: "CortexBridge-vNext-Phase2.1-P2A-Legacy-Development"
+model:
+  method: "cortexbridge-vnext-phase2.1-p2a-legacy"
+  volume_pooling:
+    mode: "legacy_mask"
+  cross_geometry:
+    enabled: false
+runtime:
+  fold: 0
+  evaluate_test: false

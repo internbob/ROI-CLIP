@@ -1,0 +1,85 @@
+experiment_name: "CortexWeave-ROIClip-Teacher"
+model:
+  name: "CortexWeave-ROIClip"
+  method: "cortexweave-roiclip"
+  surface_in_channels: 3
+  surface_hidden_dim: 128
+  surface_refiner: "none"
+  surface_refiner_hidden_dim: 0
+  surface_refiner_dropout: 0.0
+  surface_refiner_residual_init: 0.1
+  feature_dim: 128
+  proj_dim: 128
+  base_channels: 32
+  num_rois: 62
+  num_classes: 3
+  dropout: 0.2
+  roi_residual_init: 0.1
+  use_roi_branch: true
+  volume_pooling:
+    mode: "legacy_mask"
+  ribbon:
+    num_depths: 5
+    depths: [0.0, 0.25, 0.5, 0.75, 1.0]
+    depth_attention: true
+    feature_stage: "roi"
+    gate_init: 0.1
+  cross_geometry:
+    enabled: false
+    feature_stage: "high_res"
+    projection_dim: 128
+    temperature: 0.1
+    lambda_cg: 0.05
+    topology_metric_topk: 3
+  roi_graph:
+    enabled: false
+    topology_path: "/home_data/home/zhouwl2023/project/Cortexbridge/cortexweave_roiclip/outputs/vnext_phase2_1_5_20261003/true_dkt_topology.npz"
+    num_layers: 1
+    num_heads: 4
+    dropout: 0.1
+    residual_gate_init: 0.1
+    use_boundary_strength: false
+    use_homology: false
+    shuffle_topology_bias: false
+    topology_shuffle_seed: 3407
+  volume_norm: "batch"
+  use_clinical: true
+  clinical_fusion_mode: "gated"
+  clinical_hidden_dim: 256
+  clinical_dropout: 0.1
+  clinical_num_heads: 4
+  clinical_num_layers: 2
+training:
+  batch_size: 8
+  num_workers: 8
+  lr: 0.0001
+  weight_decay: 0.0001
+  epochs: 30
+  early_stop_patience: 6
+  num_folds: 5
+  seed: 3407
+  selection_metric: "mcc"
+  class_weight_mode: "sqrt_balanced"
+  ce_warmup_epochs: 5
+  roi_clip_alignment_mode: "hard"
+  roi_clip_soft_epsilon: 0.1
+  roi_clip_distance_sigma: 0.0
+  roi_clip_homology_weight: 1.0
+  roi_clip_affinity_topk: 0
+  roi_clip_min_negative_weight: 0.05
+loss_weights:
+  ce: 1.0
+  roi_clip: 0.01
+  prototype: 0.01
+  relation: 0.005
+temperature:
+  clip: 0.1
+  prototype: 0.1
+output:
+  checkpoints_dir: "./checkpoints_surface"
+runtime:
+  fold: null
+  device: ""
+  checkpoint: ""
+  output_dir: ""
+  dry_run: false

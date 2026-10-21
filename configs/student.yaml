@@ -1,0 +1,65 @@
+experiment_name: "CortexWeave-ROIClip-Student"
+model:
+  name: "CortexWeave-ROIClip"
+  method: "cortexweave-roiclip-student"
+  feature_dim: 128
+  proj_dim: 128
+  base_channels: 32
+  surface_refiner: "none"
+  surface_refiner_hidden_dim: 0
+  surface_refiner_dropout: 0.0
+  surface_refiner_residual_init: 0.1
+  num_rois: 62
+  num_classes: 3
+  dropout: 0.2
+  roi_residual_init: 0.1
+  volume_norm: "batch"
+  use_clinical: true
+  student_use_clinical: false
+  volume_pooling:
+    mode: "legacy_mask"
+  ribbon:
+    num_depths: 5
+    depths: [0.0, 0.25, 0.5, 0.75, 1.0]
+    depth_attention: true
+  clinical_fusion_mode: "gated"
+  clinical_hidden_dim: 256
+  clinical_dropout: 0.1
+  clinical_num_heads: 4
+  clinical_num_layers: 2
+training:
+  batch_size: 8
+  num_workers: 8
+  lr: 0.0001
+  weight_decay: 0.00001
+  epochs: 30
+  early_stop_patience: 8
+  num_folds: 5
+  seed: 3407
+  selection_metric: "mcc"
+  class_weight_mode: "sqrt_balanced"
+  teacher_checkpoint: ""
+  warmup_epochs: 8
+  encoder_lr: 0.000002
+  inherited_lr: 0.000002
+loss_weights:
+  ce: 1.0
+  kd_logit: 0.25
+  kd_token: 0.1
+  kd_attention: 0.0
+  kd_relation: 0.01
+  kd_prototype: 0.01
+  roi_attention_mass: 0.0
+  roi_occupancy: 0.0
+  roi_center: 0.0
+temperature:
+  kd: 4.0
+  prototype: 0.1
+output:
+  checkpoints_dir: "./checkpoints_surface"
+runtime:
+  fold: null
+  device: ""
+  checkpoint: ""
+  output_dir: ""
+  dry_run: false

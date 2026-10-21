@@ -11,6 +11,8 @@ from .clinical_encoder import (
     ClinicalGatedFusion,
     ImagingClinicalCrossTransformer,
 )
+from .cortical_ribbon_sampler import CorticalRibbonSampler
+from .disease_aware_graph import DiseaseAwareROIGraph
 from .prototypes import DiseasePrototypeBank
 from .relation import pairwise_cosine_matrix
 from .roi_clip import ROIClipProjector
@@ -324,10 +326,42 @@ class CortexWeaveROIClipTeacher(nn.Module):
         surface_refiner_hidden_dim=0,
         surface_refiner_dropout=0.0,
         surface_refiner_residual_init=0.1,
+        volume_pooling_mode="legacy_mask",
+        ribbon_depth_attention=True,
+        ribbon_feature_stage="roi",
+        ribbon_gate_init=0.1,
+        cross_geometry_enabled=False,
+        cross_geometry_dim=128,
+        cross_geometry_feature_stage="high_res",
+        roi_graph_enabled=False,
+        roi_graph_num_layers=1,
+        roi_graph_num_heads=4,
+        roi_graph_dropout=0.1,
+        roi_graph_residual_gate_init=0.1,
+        roi_graph_use_boundary_strength=False,
+        roi_graph_use_homology=False,
+        roi_graph_anatomy_adjacency=None,
+        roi_graph_boundary_strength=None,
+        roi_graph_evaluation_boundary_strength=None,
+        roi_graph_homology=None,
+        roi_graph_evaluation_homology=None,
     ):
         super().__init__()
         self.use_roi_branch = bool(use_roi_branch)
         self.use_clinical = bool(use_clinical)
+        self.volume_pooling_mode = str(volume_pooling_mode).lower()
+        if self.volume_pooling_mode not in {"legacy_mask", "ribbon", "hybrid_ribbon"}:
+            raise ValueError(f"Unsupported volume pooling mode: {volume_pooling_mode}")
+        self.ribbon_feature_stage = str(ribbon_feature_stage).lower()
+        if self.ribbon_feature_stage not in {"roi", "high_res"}:
+            raise ValueError(f"Unsupported ribbon feature stage: {ribbon_feature_stage}")
+        self.cross_geometry_enabled = bool(cross_geometry_enabled)
+        self.roi_graph_enabled = bool(roi_graph_enabled)
+        self.cross_geometry_feature_stage = str(cross_geometry_feature_stage).lower()
+        if self.cross_geometry_feature_stage != "high_res":
+            raise ValueError(
+                "Phase 2.1 cross-geometry anchors must use the high_res MRI feature stage"
+            )
         self.clinical_fusion_mode = str(clinical_fusion_mode).lower()
         if self.clinical_fusion_mode not in {"gated", "cross", "atlas_prompt"}:
             raise ValueError(f"Unsupported clinical fusion mode: {clinical_fusion_mode}")
@@ -348,6 +382,77 @@ class CortexWeaveROIClipTeacher(nn.Module):
             norm=volume_norm,
         )
         self.volume_pool = MaskedVolumeTokenPooling(in_dim=feature_dim, out_dim=feature_dim, num_rois=num_rois)
+        ribbon_enabled = self.volume_pooling_mode in {"ribbon", "hybrid_ribbon"}
+        ribbon_feature_dim = base_channels if self.ribbon_feature_stage == "high_res" else feature_dim
+        # Do not let optional ribbon modules advance the RNG seen by the
+        # unchanged legacy/common layers. This keeps same-seed ablations
+        # matched outside the pooling branch.
+        optional_ribbon_enabled = ribbon_enabled or self.cross_geometry_enabled
+        common_rng_state = torch.random.get_rng_state() if optional_ribbon_enabled else None
+        self.ribbon_sampler = (
+            CorticalRibbonSampler(
+                feature_dim=ribbon_feature_dim,
+                num_rois=num_rois,
+                depth_attention=bool(ribbon_depth_attention),
+            )
+            if ribbon_enabled
+            else None
+        )
+        self.pure_ribbon_projection = (
+            nn.Sequential(nn.LayerNorm(ribbon_feature_dim), nn.Linear(ribbon_feature_dim, feature_dim))
+            if self.volume_pooling_mode == "ribbon" and ribbon_feature_dim != feature_dim
+            else nn.Identity()
+            if self.volume_pooling_mode == "ribbon"
+            else None
+        )
+        if self.volume_pooling_mode == "hybrid_ribbon":
+            self.hybrid_legacy_norm = nn.LayerNorm(feature_dim)
+            self.hybrid_ribbon_norm = nn.LayerNorm(ribbon_feature_dim)
+            self.hybrid_ribbon_projection = (
+                nn.Linear(ribbon_feature_dim, feature_dim)
+                if ribbon_feature_dim != feature_dim
+                else nn.Identity()
+            )
+            self.hybrid_ribbon_adapter = nn.Sequential(
+                nn.Linear(feature_dim, feature_dim),
+                nn.GELU(),
+                nn.Linear(feature_dim, feature_dim),
+            )
+            nn.init.zeros_(self.hybrid_ribbon_adapter[-1].weight)
+            nn.init.zeros_(self.hybrid_ribbon_adapter[-1].bias)
+            gate_init = min(max(float(ribbon_gate_init), 1e-4), 1.0 - 1e-4)
+            self.hybrid_ribbon_gate = nn.Linear(feature_dim * 2 + 1, 1)
+            nn.init.zeros_(self.hybrid_ribbon_gate.weight)
+            nn.init.constant_(self.hybrid_ribbon_gate.bias, math.log(gate_init / (1.0 - gate_init)))
+        else:
+            self.hybrid_legacy_norm = None
+            self.hybrid_ribbon_norm = None
+            self.hybrid_ribbon_projection = None
+            self.hybrid_ribbon_adapter = None
+            self.hybrid_ribbon_gate = None
+        cross_geometry_dim = int(cross_geometry_dim)
+        if cross_geometry_dim <= 0:
+            raise ValueError("cross_geometry_dim must be positive")
+        if self.cross_geometry_enabled:
+            self.cross_geometry_ribbon_sampler = CorticalRibbonSampler(
+                feature_dim=base_channels,
+                num_rois=num_rois,
+                depth_attention=False,
+            )
+            self.cross_geometry_surface_projector = nn.Sequential(
+                nn.LayerNorm(feature_dim),
+                nn.Linear(feature_dim, cross_geometry_dim),
+            )
+            self.cross_geometry_ribbon_projector = nn.Sequential(
+                nn.LayerNorm(base_channels),
+                nn.Linear(base_channels, cross_geometry_dim),
+            )
+        else:
+            self.cross_geometry_ribbon_sampler = None
+            self.cross_geometry_surface_projector = None
+            self.cross_geometry_ribbon_projector = None
+        if common_rng_state is not None:
+            torch.random.set_rng_state(common_rng_state)
         self.roi_clip = ROIClipProjector(in_dim=feature_dim, proj_dim=proj_dim)
         self.prototype_bank = DiseasePrototypeBank(
             num_classes=num_classes,
@@ -360,6 +465,28 @@ class CortexWeaveROIClipTeacher(nn.Module):
             nn.GELU(),
             nn.LayerNorm(proj_dim),
         )
+        graph_rng_state = torch.random.get_rng_state() if self.roi_graph_enabled else None
+        self.roi_graph = (
+            DiseaseAwareROIGraph(
+                feature_dim=proj_dim,
+                num_rois=num_rois,
+                num_heads=roi_graph_num_heads,
+                num_layers=roi_graph_num_layers,
+                dropout=roi_graph_dropout,
+                residual_gate_init=roi_graph_residual_gate_init,
+                use_boundary_strength=roi_graph_use_boundary_strength,
+                use_homology=roi_graph_use_homology,
+                anatomy_adjacency=roi_graph_anatomy_adjacency,
+                boundary_strength=roi_graph_boundary_strength,
+                evaluation_boundary_strength=roi_graph_evaluation_boundary_strength,
+                homology=roi_graph_homology,
+                evaluation_homology=roi_graph_evaluation_homology,
+            )
+            if self.roi_graph_enabled
+            else None
+        )
+        if graph_rng_state is not None:
+            torch.random.set_rng_state(graph_rng_state)
         self.classifier = ROIClassifierHead(token_dim=proj_dim, num_classes=num_classes, dropout=dropout)
         self.global_head = GlobalClassifierHead(feature_dim=feature_dim, num_classes=num_classes, dropout=dropout)
         self.clinical_fusion = (
@@ -419,6 +546,10 @@ class CortexWeaveROIClipTeacher(nn.Module):
         roi_volume_masks,
         labels=None,
         clinical_data=None,
+        ribbon_grid=None,
+        ribbon_valid_mask=None,
+        vertex_valid_mask=None,
+        vertex_roi_index=None,
     ):
         del labels
         feat_map, multi_scale_features, global_feat = self.volume_encoder(image)
@@ -493,7 +624,95 @@ class CortexWeaveROIClipTeacher(nn.Module):
         surface_features = self.surface_refiner(surface_features, surface_roi_masks)
         surface_tokens, surface_roi_weights = self.surface_pool(surface_features, surface_roi_masks)
 
-        volume_tokens, local_tokens, roi_tokens, aux = self.volume_pool(feat_map, local_ribbon_masks, roi_volume_masks)
+        cross_geometry_outputs = None
+        cross_geometry_surface = None
+        cross_geometry_ribbon = None
+        ribbon_anchor_tokens = None
+        if self.cross_geometry_enabled:
+            required = {
+                "ribbon_grid": ribbon_grid,
+                "ribbon_valid_mask": ribbon_valid_mask,
+                "vertex_valid_mask": vertex_valid_mask,
+                "vertex_roi_index": vertex_roi_index,
+            }
+            missing = [name for name, value in required.items() if value is None]
+            if missing:
+                raise ValueError(f"Cross-geometry alignment requires inputs: {', '.join(missing)}")
+            cross_geometry_outputs = self.cross_geometry_ribbon_sampler(
+                feature_map=multi_scale_features[0],
+                ribbon_grid=ribbon_grid,
+                vertex_roi_index=vertex_roi_index,
+                ribbon_valid_mask=ribbon_valid_mask,
+                vertex_valid_mask=vertex_valid_mask,
+            )
+            ribbon_anchor_tokens = cross_geometry_outputs["roi_features"]
+            cross_geometry_surface = F.normalize(
+                self.cross_geometry_surface_projector(surface_tokens), dim=-1
+            )
+            cross_geometry_ribbon = F.normalize(
+                self.cross_geometry_ribbon_projector(ribbon_anchor_tokens), dim=-1
+            )
+
+        ribbon_outputs = None
+        hybrid_gate = None
+        hybrid_delta = None
+        ribbon_context_tokens = None
+        if self.volume_pooling_mode in {"ribbon", "hybrid_ribbon"}:
+            # Preserve legacy mask diagnostics for the existing spatial-KD code,
+            # without retaining an unused trainable legacy pooling graph.
+            if self.volume_pooling_mode == "hybrid_ribbon":
+                legacy_volume_tokens, local_tokens, roi_tokens, aux = self.volume_pool(
+                    feat_map, local_ribbon_masks, roi_volume_masks
+                )
+            else:
+                with torch.no_grad():
+                    legacy_volume_tokens, local_tokens, roi_tokens, aux = self.volume_pool(
+                        feat_map, local_ribbon_masks, roi_volume_masks
+                    )
+            required = {
+                "ribbon_grid": ribbon_grid,
+                "ribbon_valid_mask": ribbon_valid_mask,
+                "vertex_valid_mask": vertex_valid_mask,
+                "vertex_roi_index": vertex_roi_index,
+            }
+            missing = [name for name, value in required.items() if value is None]
+            if missing:
+                raise ValueError(f"Ribbon pooling requires inputs: {', '.join(missing)}")
+            ribbon_feature_map = (
+                multi_scale_features[0]
+                if self.ribbon_feature_stage == "high_res"
+                else feat_map
+            )
+            ribbon_outputs = self.ribbon_sampler(
+                feature_map=ribbon_feature_map,
+                ribbon_grid=ribbon_grid,
+                vertex_roi_index=vertex_roi_index,
+                ribbon_valid_mask=ribbon_valid_mask,
+                vertex_valid_mask=vertex_valid_mask,
+            )
+            if self.volume_pooling_mode == "hybrid_ribbon":
+                legacy_context_tokens = self.hybrid_legacy_norm(legacy_volume_tokens)
+                ribbon_context_tokens = self.hybrid_ribbon_projection(
+                    self.hybrid_ribbon_norm(ribbon_outputs["roi_features"])
+                )
+                validity = ribbon_outputs["roi_valid_ratio"].unsqueeze(-1)
+                hybrid_gate = torch.sigmoid(
+                    self.hybrid_ribbon_gate(
+                        torch.cat([legacy_context_tokens, ribbon_context_tokens, validity], dim=-1)
+                    )
+                )
+                hybrid_delta = self.hybrid_ribbon_adapter(ribbon_context_tokens)
+                # The zero-initialized adapter makes the initial hybrid model
+                # exactly equal to the legacy pooling baseline.
+                volume_tokens = legacy_volume_tokens + validity * hybrid_gate * hybrid_delta
+            else:
+                ribbon_context_tokens = self.pure_ribbon_projection(ribbon_outputs["roi_features"])
+                volume_tokens = ribbon_context_tokens
+        else:
+            legacy_volume_tokens, local_tokens, roi_tokens, aux = self.volume_pool(
+                feat_map, local_ribbon_masks, roi_volume_masks
+            )
+            volume_tokens = legacy_volume_tokens
 
         z_surface, z_volume, similarity_matrix = self.roi_clip(surface_tokens, volume_tokens)
         cross_outputs = None
@@ -517,8 +736,10 @@ class CortexWeaveROIClipTeacher(nn.Module):
                 clinical_feature = prompt_outputs["clinical_feature"]
                 clinical_gate = prompt_outputs["clinical_gate"]
                 global_logits = self.global_head(fused_global_feat)
-        z_teacher = self.teacher_fusion(torch.cat([z_surface, z_volume], dim=-1))
-        classifier_tokens = z_teacher
+        z_teacher_base = self.teacher_fusion(torch.cat([z_surface, z_volume], dim=-1))
+        graph_outputs = self.roi_graph(z_teacher_base) if self.roi_graph is not None else None
+        z_teacher_graph = graph_outputs["tokens"] if graph_outputs is not None else z_teacher_base
+        classifier_tokens = z_teacher_graph
         if self.use_clinical:
             if self.clinical_fusion_mode == "gated":
                 fused_global_feat, clinical_feature, clinical_gate = self.clinical_fusion(
@@ -527,7 +748,9 @@ class CortexWeaveROIClipTeacher(nn.Module):
                 )
                 global_logits = self.global_head(fused_global_feat)
             elif self.clinical_fusion_mode == "cross":
-                imaging_tokens = torch.cat([self.global_to_cross(global_feat).unsqueeze(1), z_teacher], dim=1)
+                imaging_tokens = torch.cat(
+                    [self.global_to_cross(global_feat).unsqueeze(1), z_teacher_graph], dim=1
+                )
                 cross_outputs = self.clinical_cross_fusion(imaging_tokens, clinical_data)
                 fused_global_feat = cross_outputs["image_tokens"][:, 0]
                 classifier_tokens = cross_outputs["image_tokens"][:, 1:]
@@ -542,7 +765,7 @@ class CortexWeaveROIClipTeacher(nn.Module):
 
         surface_relation = pairwise_cosine_matrix(z_surface)
         volume_relation = pairwise_cosine_matrix(z_volume)
-        teacher_relation = pairwise_cosine_matrix(z_teacher)
+        teacher_relation = pairwise_cosine_matrix(z_teacher_graph)
 
         outputs = {
             "logits": logits,
@@ -552,18 +775,86 @@ class CortexWeaveROIClipTeacher(nn.Module):
             "prob": prob,
             "surface_tokens": surface_tokens,
             "volume_tokens": volume_tokens,
+            "legacy_volume_tokens": legacy_volume_tokens,
+            "mri_ribbon_tokens": ribbon_context_tokens,
+            "mri_ribbon_tokens_raw": ribbon_outputs["roi_features"] if ribbon_outputs is not None else None,
+            "ribbon_vertex_features": ribbon_outputs["vertex_features"] if ribbon_outputs is not None else None,
+            "depth_attention": ribbon_outputs["depth_attention"] if ribbon_outputs is not None else None,
+            "ribbon_vertex_valid_mask": (
+                ribbon_outputs["vertex_valid_mask"] if ribbon_outputs is not None else None
+            ),
+            "ribbon_roi_valid_mask": ribbon_outputs["roi_valid_mask"] if ribbon_outputs is not None else None,
+            "ribbon_roi_vertex_count": (
+                ribbon_outputs["roi_vertex_count"] if ribbon_outputs is not None else None
+            ),
+            "ribbon_roi_valid_ratio": (
+                ribbon_outputs["roi_valid_ratio"] if ribbon_outputs is not None else None
+            ),
+            "hybrid_ribbon_gate": hybrid_gate,
+            "hybrid_ribbon_delta": hybrid_delta,
+            "ribbon_anchor_tokens": ribbon_anchor_tokens,
+            "cross_geometry_surface": cross_geometry_surface,
+            "cross_geometry_ribbon": cross_geometry_ribbon,
+            "cross_geometry_ribbon_valid_ratio": (
+                cross_geometry_outputs["roi_valid_ratio"] if cross_geometry_outputs is not None else None
+            ),
             "local_tokens": local_tokens,
             "roi_tokens": roi_tokens,
             "z_surface": z_surface,
             "z_volume": z_volume,
-            "z_teacher": z_teacher,
+            "z_teacher": z_teacher_graph,
+            "z_teacher_base": z_teacher_base,
+            "z_teacher_graph": z_teacher_graph,
+            "roi_graph_attention": graph_outputs["attention"] if graph_outputs is not None else None,
+            "roi_graph_mean_attention": (
+                graph_outputs["mean_attention"] if graph_outputs is not None else None
+            ),
+            "roi_graph_anatomical_mass": (
+                graph_outputs["anatomical_mass"] if graph_outputs is not None else None
+            ),
+            "roi_graph_homology_mass": (
+                graph_outputs["homology_mass"] if graph_outputs is not None else None
+            ),
+            "roi_graph_identity_mass": (
+                graph_outputs["identity_mass"] if graph_outputs is not None else None
+            ),
+            "roi_graph_remote_mass": (
+                graph_outputs["remote_mass"] if graph_outputs is not None else None
+            ),
+            "roi_graph_attention_entropy": (
+                graph_outputs["attention_entropy"] if graph_outputs is not None else None
+            ),
+            "roi_graph_attention_uniform_kl": (
+                graph_outputs["attention_uniform_kl"] if graph_outputs is not None else None
+            ),
+            "roi_graph_attention_std": (
+                graph_outputs["attention_std"] if graph_outputs is not None else None
+            ),
+            "roi_graph_boundary_correlation": (
+                graph_outputs["boundary_correlation"] if graph_outputs is not None else None
+            ),
+            "roi_graph_uniform_anatomical_mass": (
+                graph_outputs["uniform_anatomical_mass"] if graph_outputs is not None else None
+            ),
+            "roi_graph_uniform_homology_mass": (
+                graph_outputs["uniform_homology_mass"] if graph_outputs is not None else None
+            ),
+            "roi_graph_residual_gate": (
+                graph_outputs["residual_gate"] if graph_outputs is not None else None
+            ),
+            "roi_graph_output_delta_l2": (
+                graph_outputs["output_delta_l2"] if graph_outputs is not None else None
+            ),
             "surface_relation": surface_relation,
             "volume_relation": volume_relation,
             "relation": teacher_relation,
             "surface_prototype_logits": self.prototype_bank(z_surface),
             "volume_prototype_logits": self.prototype_bank(z_volume),
-            "prototype_logits": self.prototype_bank(z_teacher),
+            "prototype_logits": self.prototype_bank(z_teacher_graph),
             "mask_attention": aux["local_attention"],
+            "local_mask_attention": aux["local_attention"],
+            "roi_mask_attention": aux["roi_attention"],
+            "roi_occupancy": aux["roi_masks"],
             "similarity_matrix": similarity_matrix,
             "surface_roi_weights": surface_roi_weights,
             "multi_scale_features": multi_scale_features,

@@ -72,6 +72,21 @@ CSV 至少需要：
 
 这两侧 ROI 是一一对应的，volume 侧为了节省内存，代码内部改成了紧凑 `label-map` 表示，只在低分辨率特征图上再转 one-hot pooling。
 
+### MRI-atlas 空间对齐与 v3 cache
+
+体积侧采用以下固定流程，不能再对 MRI 与 FreeSurfer 标签分别做中心裁剪：
+
+1. 从 split CSV 的 `path/subject/session/t1/filename.nii.gz` 读取 MRI，并中心裁剪/补零到 `(160, 192, 160)`。
+2. 用裁剪起点更新 MRI affine，使裁剪后 voxel `(0, 0, 0)` 仍指向正确的世界坐标。
+3. 根据该 target shape 和 adjusted affine，用最近邻插值分别重采样 `aparc.DKTatlas+aseg.mgz`、`lh.ribbon.mgz` 和 `rh.ribbon.mgz`。
+4. 在已经对齐的 MRI 网格上构造 ROI/local-ribbon label map，再用最近邻规则降采样到 `(20, 24, 20)`。
+
+当前 cache 版本为 `v3`。每个 `.npz` 都保存 `target_mri_shape`、`target_mri_affine` 和空间对齐标志；加载时会同时核对版本、shape 与 affine，旧 v1/v2 cache 不会被静默复用。默认 ADNI cache 为：
+
+`/home_data/home/zhouwl2023/Data/CortexWeave_ROIClip_cache/adni_dktatlas_5124_roi20x24x20_affine_v3`
+
+同级目录下还生成了 `oasis3_dktatlas_5124_roi20x24x20_affine_v3` 和 `huashan_dktatlas_5124_roi20x24x20_affine_v3`。每个目录的 `cache_manifest.json` 记录数据源、样本数、对齐方法和输出 shape。
+
 推荐每个 subject 提前放一个 `roi_bundle.npz`，可放在下面任一位置：
 
 - `<surface_root>/<subject>/roiclip/roi_bundle.npz`
@@ -93,6 +108,39 @@ CSV 至少需要：
 
 这个回退主要用于先把流程跑通；真正复现实验时，建议替换成你方法文档里定义的 white-pial ribbon / ROI mask。
 
+## vNext Phase 1：white–pial multi-depth ribbon
+
+Phase 1 使用独立 ribbon cache，不修改也不废弃上述 v3 atlas cache。预计算真实
+FreeSurfer `white/pial` 坐标：
+
+```bash
+python data/precompute_ribbon_bundle.py \
+  --ribbon-cache-root /home_data/home/zhouwl2023/Data/CortexWeave_ROIClip_cache/adni_dktatlas_5124_ribbon_v1 \
+  --fold 0 --num-workers 8
+```
+
+正式训练前，至少抽查 5 个受试者的坐标叠加图：
+
+```bash
+python data/visualize_ribbon_bundle.py \
+  --mri /path/to/subject_T1.nii.gz \
+  --bundle /path/to/ribbon_cache/subject.npz \
+  --output /path/to/qc/subject.png
+```
+
+Phase 1 ribbon 实验：
+
+```bash
+python train_teacher.py --config \
+  configs/data.yaml \
+  configs/teacher.yaml \
+  configs/runtime_vnext_phase1_ribbon_fold0.yaml
+```
+
+`model.volume_pooling.mode=legacy_mask` 保持历史模型行为；只有显式设置为
+`ribbon` 时才要求 ribbon bundle。ribbon 模式不存在随机坐标或旧 mask 的静默回退。
+空间增强中的 voxel shift 必须保持为 0，除非同时变换 `ribbon_grid`。
+
 ## 训练
 
 Teacher:
@@ -105,7 +153,12 @@ python train_teacher.py
 Student:
 
 ```bash
-python train_student.py --checkpoint /path/to/teacher_experiment_dir
+python train_student.py --config \
+  configs/data.yaml \
+  configs/student.yaml \
+  configs/runtime_vnext_graph_student_locked_s4.yaml \
+  --fold 0 --device cuda \
+  --output_dir /path/to/locked_s4_output
 ```
 
 `train_student.py` 会优先读取：
@@ -129,17 +182,31 @@ python evaluate.py --checkpoint /path/to/fold_0/best_student.pt --fold 0
 - 3D volume encoder
 - surface ROI pooling
 - masked volume ROI pooling
+- real white–pial multi-depth ribbon sampling（可选）
+- hard Surface↔Ribbon cross-geometry anchoring（ribbon 不进入 classifier）
+- true DKT mesh boundary / bilateral homology topology assets
+- DiseaseAwareROIGraph with soft anatomy priors
 - ROI-CLIP alignment
 - disease-aware prototype bank
 - ROI relation consistency
 - teacher training
-- MRI-only student distillation
+- topology-seeded strict MRI-only Graph Student
+- logit + graph-enhanced ROI-state distillation（development-locked S4）
 - ROI attention 可视化脚本
+
+开发集 progressive ablation 已完成。S4 在 matched 三折中具有最高 mean MCC，因而锁定
+`configs/runtime_vnext_graph_student_locked_s4.yaml`；graph-relation KD 与
+prototype-posterior KD 不再进入主配置。所有选择均未读取 held-out test。详细证据见：
+
+- `outputs/vnext_graph_student_20261019/GRAPH_STUDENT_COMPONENT_ABLATION_REPORT.md`
+- `docs/CortexBridge_vNext_Journal_Method_Status_and_Experiment_Roadmap.md`
 
 当前没有做成强依赖：
 
 - 真正的 spherical CNN
-- white / pial surface 精确体素化
+- multi-scale ribbon sampling（Phase 1 当前只使用最后一级 ROI feature map）
 - cortex-aware heterogeneous convolution
+- topology-soft correspondence target
+- PET branch 或 ROI-wise cognitive modulation
 
 如果你后面已经有更精确的 ROI bundle 生成代码，可以直接接到 `data/dataset.py` 里的 `roi_bundle.npz` 读取接口上，不需要改 teacher / student 主干。

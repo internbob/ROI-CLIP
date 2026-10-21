@@ -6,9 +6,10 @@ import torch.nn.functional as F
 
 from .heads import GlobalClassifierHead, ROIClassifierHead
 from .clinical_encoder import ClinicalAtlasPromptFusion, ClinicalGatedFusion, ImagingClinicalCrossTransformer
+from .disease_aware_graph import DiseaseAwareROIGraph
 from .prototypes import DiseasePrototypeBank
 from .relation import pairwise_cosine_matrix
-from .volume_encoder import SFCNVolumeEncoder3D
+from .volume_encoder import build_student_volume_encoder
 
 
 class MRIOnlyStudent(nn.Module):
@@ -30,25 +31,92 @@ class MRIOnlyStudent(nn.Module):
         clinical_dropout=0.1,
         clinical_num_heads=4,
         clinical_num_layers=2,
+        topology_query_pe=None,
+        topology_query_trainable_residual=True,
+        roi_graph_enabled=False,
+        roi_graph_num_layers=1,
+        roi_graph_num_heads=4,
+        roi_graph_dropout=0.1,
+        roi_graph_residual_gate_init=0.1,
+        roi_graph_use_boundary_strength=False,
+        roi_graph_use_homology=False,
+        roi_graph_anatomy_adjacency=None,
+        roi_graph_boundary_strength=None,
+        roi_graph_evaluation_boundary_strength=None,
+        roi_graph_homology=None,
+        roi_graph_evaluation_homology=None,
+        volume_encoder_name="sfcn",
+        volume_encoder_pretrained_path="",
+        volume_encoder_freeze_bn_stats=False,
+        roi_classification_enabled=True,
+        roi_classifier_use_raw_tokens=False,
     ):
         super().__init__()
         self.use_clinical = bool(use_clinical)
         self.clinical_fusion_mode = str(clinical_fusion_mode).lower()
         if self.clinical_fusion_mode not in {"gated", "cross", "atlas_prompt"}:
             raise ValueError(f"Unsupported clinical fusion mode: {clinical_fusion_mode}")
-        self.volume_encoder = SFCNVolumeEncoder3D(
+        self.volume_encoder_name = str(volume_encoder_name).lower()
+        self.roi_classification_enabled = bool(roi_classification_enabled)
+        self.roi_classifier_use_raw_tokens = bool(roi_classifier_use_raw_tokens)
+        self.volume_encoder = build_student_volume_encoder(
+            name=self.volume_encoder_name,
             in_channels=1,
             base_channels=base_channels,
             out_dim=feature_dim,
             norm=volume_norm,
+            pretrained_path=volume_encoder_pretrained_path,
+            freeze_bn_stats=volume_encoder_freeze_bn_stats,
         )
-        self.roi_queries = nn.Parameter(torch.randn(1, num_rois, feature_dim) * 0.02)
+        if topology_query_pe is None:
+            self.register_buffer("topology_query_pe", None)
+            self.topology_query_proj = None
+            self.roi_queries = nn.Parameter(torch.randn(1, num_rois, feature_dim) * 0.02)
+            self.roi_query_delta = None
+        else:
+            topology_query_pe = torch.as_tensor(topology_query_pe, dtype=torch.float32)
+            if topology_query_pe.dim() != 2 or int(topology_query_pe.shape[0]) != int(num_rois):
+                raise ValueError(
+                    f"topology_query_pe must have shape [{num_rois}, P], got "
+                    f"{tuple(topology_query_pe.shape)}"
+                )
+            self.register_buffer("topology_query_pe", topology_query_pe.unsqueeze(0))
+            self.topology_query_proj = nn.Linear(int(topology_query_pe.shape[1]), feature_dim, bias=False)
+            self.roi_queries = None
+            self.roi_query_delta = nn.Parameter(
+                torch.zeros(1, num_rois, feature_dim),
+                requires_grad=bool(topology_query_trainable_residual),
+            )
         self.to_q = nn.Linear(feature_dim, feature_dim)
         self.to_k = nn.Linear(feature_dim, feature_dim)
         self.to_v = nn.Linear(feature_dim, feature_dim)
         self.scale = 1.0 / math.sqrt(float(feature_dim))
         self.out_proj = nn.Linear(feature_dim, feature_dim)
         self.projector = nn.Linear(feature_dim, proj_dim)
+        # Graph construction must not change initialization of the shared
+        # prototype/classifier heads.  This keeps graph-on/off ablations
+        # matched under the same seed.
+        rng_state = torch.random.get_rng_state()
+        self.roi_graph = (
+            DiseaseAwareROIGraph(
+                feature_dim=proj_dim,
+                num_rois=num_rois,
+                num_heads=roi_graph_num_heads,
+                num_layers=roi_graph_num_layers,
+                dropout=roi_graph_dropout,
+                residual_gate_init=roi_graph_residual_gate_init,
+                use_boundary_strength=roi_graph_use_boundary_strength,
+                use_homology=roi_graph_use_homology,
+                anatomy_adjacency=roi_graph_anatomy_adjacency,
+                boundary_strength=roi_graph_boundary_strength,
+                evaluation_boundary_strength=roi_graph_evaluation_boundary_strength,
+                homology=roi_graph_homology,
+                evaluation_homology=roi_graph_evaluation_homology,
+            )
+            if bool(roi_graph_enabled)
+            else None
+        )
+        torch.random.set_rng_state(rng_state)
         self.prototype_bank = DiseasePrototypeBank(
             num_classes=num_classes,
             num_rois=num_rois,
@@ -110,15 +178,35 @@ class MRIOnlyStudent(nn.Module):
         bsz, channels, h, w, d = feat_map.shape
         tokens = feat_map.flatten(2).transpose(1, 2)
 
-        queries = self.roi_queries.expand(bsz, -1, -1)
+        if self.topology_query_pe is None:
+            queries = self.roi_queries.expand(bsz, -1, -1)
+        else:
+            queries = self.topology_query_proj(self.topology_query_pe)
+            if self.roi_query_delta is not None:
+                queries = queries + self.roi_query_delta
+            queries = queries.expand(bsz, -1, -1)
         q = self.to_q(queries)
         k = self.to_k(tokens)
         v = self.to_v(tokens)
 
-        attn = torch.softmax((q @ k.transpose(-1, -2)) * self.scale, dim=-1)
+        spatial_logits = (q @ k.transpose(-1, -2)) * self.scale
+        attn = torch.softmax(spatial_logits, dim=-1)
         student_tokens = self.out_proj(attn @ v)
-        z_student = F.normalize(self.projector(student_tokens), dim=-1)
-        classifier_tokens = z_student
+        z_student_base_raw = self.projector(student_tokens)
+        z_student_base = F.normalize(z_student_base_raw, dim=-1)
+        graph_input = z_student_base_raw if self.roi_classifier_use_raw_tokens else z_student_base
+        graph_outputs = self.roi_graph(graph_input) if self.roi_graph is not None else None
+        z_student_graph_raw = graph_outputs["tokens"] if graph_outputs is not None else graph_input
+        # Preserve the historical representation exactly by default.  In the
+        # raw-token ablation, classification retains magnitude while the KD,
+        # relation, and prototype interfaces remain normalized.
+        z_student_graph = (
+            F.normalize(z_student_graph_raw, dim=-1)
+            if self.roi_classifier_use_raw_tokens
+            else z_student_graph_raw
+        )
+        z_student = z_student_graph
+        classifier_tokens = z_student_graph_raw
         cross_outputs = None
         prompt_outputs = None
         clinical_feature = None
@@ -155,9 +243,14 @@ class MRIOnlyStudent(nn.Module):
             global_logits = self.global_head(global_feat)
         roi_logits = self.classifier(classifier_tokens)
         roi_weight = torch.sigmoid(self.roi_logit_scale)
-        logits = global_logits + roi_weight * roi_logits
+        logits = (
+            global_logits + roi_weight * roi_logits
+            if self.roi_classification_enabled
+            else global_logits
+        )
         prob = torch.softmax(logits, dim=-1)
         attention_maps = attn.reshape(bsz, queries.size(1), h, w, d)
+        spatial_logits = spatial_logits.reshape(bsz, queries.size(1), h, w, d)
 
         return {
             "logits": logits,
@@ -167,9 +260,18 @@ class MRIOnlyStudent(nn.Module):
             "prob": prob,
             "student_tokens": student_tokens,
             "z_student": z_student,
+            "z_student_base": z_student_base,
+            "z_student_base_raw": z_student_base_raw,
+            "z_student_graph": z_student_graph,
+            "z_student_graph_raw": z_student_graph_raw,
+            "roi_graph_attention": graph_outputs["attention"] if graph_outputs is not None else None,
+            "roi_graph_mean_attention": (
+                graph_outputs["mean_attention"] if graph_outputs is not None else None
+            ),
             "attention_maps": attention_maps,
-            "relation": pairwise_cosine_matrix(z_student),
-            "prototype_logits": self.prototype_bank(z_student),
+            "spatial_logits": spatial_logits,
+            "relation": pairwise_cosine_matrix(z_student_graph),
+            "prototype_logits": self.prototype_bank(z_student_graph),
             "multi_scale_features": multi_scale_features,
             "global_volume_feat": global_feat,
             "fused_global_feat": fused_global_feat,

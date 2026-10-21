@@ -1,57 +1,97 @@
-# 默认忽略所有内容
-*
+# 默认忽略项目根目录中的所有内容
+/*
 
-# Git配置文件
-!.gitignore
+# 保留 Git 配置
+!/.gitignore
 
-# 核心代码目录
-!losses/
-!losses/**
-!models/
-!models/**
+# 保留说明及训练脚本
+!/README.md
+!/train_student.py
+!/train_teacher.py
+!/requirements.txt
+!/environment.yml
+!/evaluate.py
+!/evaluate_correspondence_audit.py
+!/audit_clinical_leakage.py
+!/docs/
+!/docs/**
 
-# 可选的根目录代码文件
-!README.md
-!requirements.txt
-!environment.yml
-!train_teacher.py
-!train_student.py
+# vNext Phase 1 的精确配置、数据接口与测试（其余历史文件仍保持忽略）
+!/configs/
+/configs/*
+!/configs/data.yaml
+!/configs/teacher.yaml
+!/configs/student.yaml
+!/configs/runtime_vnext_phase1_ribbon_fold0.yaml
+!/configs/runtime_vnext_phase1_legacy_fold0.yaml
+!/configs/runtime_vnext_phase1_1_e2_inner_uniform.yaml
+!/configs/runtime_vnext_phase1_1_e3_hybrid.yaml
+!/configs/runtime_vnext_phase1_1_e0_legacy_dev.yaml
+!/configs/runtime_vnext_phase2_1_p2a_legacy_dev.yaml
+!/configs/runtime_vnext_phase2_1_p2b_cg_lambda001.yaml
+!/configs/runtime_vnext_phase2_1_p2b_cg_lambda005.yaml
+!/configs/runtime_vnext_phase2_1_p2b_cg_lambda010.yaml
 
-# Python缓存
+!/data/
+/data/*
+!/data/dataset.py
+!/data/collate.py
+!/data/ribbon_geometry.py
+!/data/precompute_ribbon_bundle.py
+!/data/visualize_ribbon_bundle.py
+!/data/qc_ribbon_cache.py
+!/data/diagnose_ribbon_features.py
+!/data/dkt_topology.py
+
+!/tests/
+/tests/*
+!/tests/test_cortical_ribbon_sampler.py
+!/tests/test_ribbon_geometry.py
+!/tests/test_teacher_ribbon_pooling.py
+!/tests/test_mri_only_student_contract.py
+!/tests/test_cross_geometry_loss.py
+!/tests/test_dkt_topology.py
+!/tests/test_correspondence_audit.py
+!/tests/test_clinical_leakage_audit.py
+
+# 保留代码目录
+!/losses/
+!/losses/**
+!/models/
+!/models/**
+
+# 无论位于何处，都忽略 Python 缓存
 **/__pycache__/
-*.pyc
-*.pyo
-*.pyd
+**/*.pyc
+**/*.pyo
+**/*.pyd
 
-# 模型权重
-*.pt
-*.pth
-*.ckpt
-*.onnx
+# 忽略模型权重和大型数据
+**/*.pt
+**/*.pth
+**/*.ckpt
+**/*.onnx
+**/*.npy
+**/*.npz
+**/*.h5
+**/*.hdf5
+**/*.nii
+**/*.nii.gz
+**/*.mgz
+**/*.pkl
 
-# 医学影像及数据
-*.nii
-*.nii.gz
-*.mgz
-*.npy
-*.npz
-*.h5
-*.hdf5
-*.pkl
+# 忽略实验输出
+**/logs/
+**/outputs/
+**/results/
+**/runs/
+**/wandb/
+**/tensorboard/
+**/*.log
 
-# 日志与实验结果
-logs/
-outputs/
-results/
-runs/
-wandb/
-tensorboard/
-*.log
-
-# 编辑器和临时文件
-.vscode/
-.idea/
-.cache/
-tmp/
-temp/
-*.swp
+# 编辑器及缓存
+**/.vscode/
+**/.idea/
+**/.cache/
+**/tmp/
+**/temp/

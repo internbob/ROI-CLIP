@@ -1,0 +1,112 @@
+# CortexBridge vNext exploration DAG
+tree:
+  - id: N01
+    type: question
+    support_level: explicit
+    source_refs: ["Implementation Guide §1/§2", "Phase 1 gate report"]
+    title: How should cortical surface information constrain MRI representation?
+    description: Determine whether ribbon geometry should replace MRI ROI pooling or serve another role.
+    children:
+      - id: N02
+        type: experiment
+        support_level: explicit
+        source_refs: ["Phase 1 gate report: Cache and coordinate QC"]
+        title: Validate white-pial geometry and cache
+        result: Full cache and seeded coordinate overlays passed, excluding gross geometry failure.
+        evidence: [C01]
+        children:
+          - id: N03
+            type: experiment
+            support_level: explicit
+            source_refs: ["Phase 1 gate report: Matched fold-0 comparison"]
+            title: Replace legacy pooling with pure ribbon pooling
+            result: The strict progression gate failed on the inspected held-out comparison.
+            evidence: [C02]
+            children:
+              - id: N04
+                type: dead_end
+                support_level: explicit
+                source_refs: ["Phase 1 gate report: Gate decision"]
+                title: Pure ribbon as legacy replacement
+                hypothesis: Direct cortical sampling would outperform volume-mask context pooling.
+                failure_mode: Validation and test behavior disagreed, and held-out classification metrics were lower.
+                lesson: Preserve legacy context and seek a supervision-only role for ribbon geometry.
+          - id: N05
+            type: experiment
+            support_level: explicit
+            source_refs: ["Phase 1.1 report: Development experiments"]
+            title: Stabilize ribbon with high-resolution inner depths and hybrid residuals
+            result: Pure inner-depth ribbon was near baseline but inconsistent; hybrid gating was unstable.
+            evidence: [C02]
+            children:
+              - id: N06
+                type: dead_end
+                support_level: explicit
+                source_refs: ["Phase 1.1 report: E3 hybrid residual gate"]
+                title: Hybrid ribbon fusion gate
+                hypothesis: A small residual gate would safely combine legacy and ribbon features.
+                failure_mode: It did not beat the baseline and gate magnitude jumped after auxiliary-loss activation.
+                lesson: Do not put ribbon features into the classifier without stronger evidence.
+      - id: N07
+        type: pivot
+        support_level: explicit
+        source_refs: ["Phase 2.1 request and report"]
+        title: Recast ribbon as an auxiliary correspondence anchor
+        from: Ribbon as a replacement or fused classification feature
+        to: High-resolution MRI-side cortical anchor supervised by surface ROI identity
+        trigger: Geometry was valid but classification replacement was not stably beneficial.
+        children:
+          - id: N08
+            type: experiment
+            support_level: explicit
+            source_refs: ["Phase 2.1 report: Three-fold P2-A versus P2-B"]
+            title: Hard subject-local cross-geometry alignment
+            result: Retrieval was far above random with positive gaps and no stable classification decline.
+            evidence: [C03, C06]
+            children:
+              - id: N09
+                type: decision
+                support_level: explicit
+                source_refs: ["Phase 2.1 report: Fold-0 lambda sweep"]
+                title: Select the smallest effective correspondence weight
+                choice: Retain the low-weight hard same-ROI auxiliary branch.
+                alternatives: ["medium correspondence weight", "large correspondence weight", "no correspondence"]
+                evidence: Larger weights improved retrieval but perturbed classification more.
+              - id: N10
+                type: experiment
+                support_level: explicit
+                source_refs: ["Phase 2.1.5 audit"]
+                title: Separate ROI identity, subject specificity, and anatomy
+                result: ROI identity dominated; subject specificity was weak; mesh-neighbour errors were enriched.
+                evidence: [C04, C05]
+                also_depends_on: [N02]
+                children:
+                  - id: N11
+                    type: decision
+                    support_level: inferred
+                    title: Move topology to downstream graph reasoning
+                    choice: Keep exact hard correspondence and test true topology as a graph bias.
+                    alternatives: ["replace hard target with topology-soft target", "use centroid top-three as anatomy", "direct ribbon classification"]
+                    evidence: C04 and C05 jointly indicate exact identity should be preserved while anatomy is useful for neighbour reasoning.
+                  - id: N12
+                    type: question
+                    support_level: inferred
+                    title: Can a real-topology ROI graph improve the Teacher?
+                    description: Test graph architecture, boundary prior, and homology with development-only ablations.
+  - id: N13
+    type: experiment
+    support_level: explicit
+    source_refs: ["TMI evidence package: Paired primary comparison"]
+    title: Audit historical strict MRI-only KD
+    result: Existing MRI-only KD underperformed MRI-only scratch.
+    evidence: [C10]
+    children:
+      - id: N14
+        type: pivot
+        support_level: inferred
+        title: Replace raw-volume KD with privileged graph-state KD
+        from: Distilling Teacher volume tokens to unconstrained Student queries
+        to: Distilling Teacher graph state to topology-seeded MRI queries
+        trigger: Historical strict MRI-only KD was negative and Teacher targets were insufficiently privileged.
+        also_depends_on: [N12]
+

@@ -1,0 +1,7 @@
+experiment_name: "CortexBridge-vNext-Phase1-Legacy-Fold0"
+model:
+  method: "cortexbridge-vnext-phase1-legacy"
+  volume_pooling:
+    mode: "legacy_mask"
+runtime:
+  fold: 0
