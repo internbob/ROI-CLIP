@@ -1,0 +1,67 @@
+# Development-locked Graph Student selected after the matched S0/S3/S4/S5/S6
+# three-fold component ablation. Do not tune this file on the held-out test.
+experiment_name: "CortexBridge-vNext-Graph-Student-Locked-S4"
+
+data:
+  split_root: "/home_data/home/zhouwl2023/project/Cortexbridge/cortexweave_roiclip/lookupcsv-full-huashan-adni-teacher-clean"
+  allowed_subject_prefixes: ["sub-ADNI"]
+  clinical:
+    enabled: false
+    features: []
+  mri_aug:
+    prob: 0.5
+    max_voxel_shift: 0
+    intensity_scale: 0.1
+    intensity_shift: 0.05
+    gamma: 0.1
+    noise_std: 0.01
+
+model:
+  use_clinical: false
+  student_use_clinical: false
+  volume_pooling:
+    mode: "legacy_mask"
+  ribbon:
+    num_depths: 5
+    depths: [0.2, 0.35, 0.5, 0.65, 0.8]
+    depth_attention: false
+    feature_stage: "roi"
+  cross_geometry:
+    enabled: true
+    projection_dim: 128
+    feature_stage: "high_res"
+    temperature: 0.1
+    lambda_cg: 0.01
+  topology_query:
+    enabled: true
+    components: 16
+    include_homology: true
+    trainable_residual: true
+  roi_graph:
+    enabled: true
+    topology_path: "/home_data/home/zhouwl2023/project/Cortexbridge/cortexweave_roiclip/outputs/vnext_phase2_1_5_20261003/true_dkt_topology.npz"
+    num_layers: 1
+    num_heads: 4
+    dropout: 0.1
+    residual_gate_init: 0.1
+    use_boundary_strength: true
+    use_homology: true
+    shuffle_topology_bias: false
+
+training:
+  vnext_graph_student: true
+  match_teacher_available: true
+  initialize_from_teacher: false
+  warmup_epochs: 0
+  encoder_lr: 0.0001
+  inherited_lr: 0.0001
+  teacher_checkpoint_template: "/home_data/home/zhouwl2023/project/Cortexbridge/cortexweave_roiclip/outputs/vnext_graph_stageA_20261019/g3_fold{fold}/fold_{fold}/best_teacher.pt"
+
+loss_weights:
+  vnext_kd_logit: 0.5
+  vnext_kd_roi: 1.0
+  vnext_kd_graph: 0.0
+  vnext_kd_prototype: 0.0
+
+runtime:
+  evaluate_test: false

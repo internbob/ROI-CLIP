@@ -1,0 +1,16 @@
+# Clinical-assisted extension of locked S4. Teacher remains clinical-off.
+# No MMSE or other global cognitive screening score is used.
+experiment_name: "CortexBridge-vNext-Graph-Student-S4C-Safe-Gated"
+
+data:
+  clinical:
+    enabled: true
+    features: [age, gender, education, apoe]
+
+model:
+  use_clinical: false
+  student_use_clinical: true
+  clinical_fusion_mode: "gated"
+
+runtime:
+  evaluate_test: false

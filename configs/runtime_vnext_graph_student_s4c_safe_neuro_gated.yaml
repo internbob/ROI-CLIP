@@ -1,0 +1,33 @@
+# Clinical-assisted extension of locked S4 using background + GDS/NPI-Q.
+# No MMSE, memory, fluency, or FAQ variable is used.
+experiment_name: "CortexBridge-vNext-Graph-Student-S4C-Safe-Neuro-Gated"
+
+data:
+  clinical:
+    enabled: true
+    features:
+      - age
+      - gender
+      - education
+      - apoe
+      - gds
+      - npiq_DEL
+      - npiq_HALL
+      - npiq_AGIT
+      - npiq_DEPD
+      - npiq_ANX
+      - npiq_ELAT
+      - npiq_APA
+      - npiq_DISN
+      - npiq_IRR
+      - npiq_MOT
+      - npiq_NITE
+      - npiq_APP
+
+model:
+  use_clinical: false
+  student_use_clinical: true
+  clinical_fusion_mode: "gated"
+
+runtime:
+  evaluate_test: false

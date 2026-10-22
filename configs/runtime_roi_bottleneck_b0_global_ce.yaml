@@ -1,0 +1,17 @@
+experiment_name: "CortexBridge-ROI-Bottleneck-B0-Global-CE"
+
+model:
+  student_roi_classifier:
+    enabled: false
+    use_raw_tokens: true
+  student_roi_graph:
+    enabled: false
+
+loss_weights:
+  vnext_kd_logit: 0.0
+  vnext_kd_roi: 0.0
+  vnext_kd_graph: 0.0
+  vnext_kd_prototype: 0.0
+
+runtime:
+  evaluate_test: false

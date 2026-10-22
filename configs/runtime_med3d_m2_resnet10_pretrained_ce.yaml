@@ -1,0 +1,27 @@
+# M2: pretrained-encoder effect, without teacher distillation.
+experiment_name: "CortexBridge-Med3D-M2-ResNet10-Pretrained-CE"
+
+model:
+  student_backbone:
+    name: "medicalnet_resnet10"
+    pretrained_path: "/home_data/home/zhouwl2023/project/Cortexbridge/cortexweave_roiclip/pretrained/medicalnet/resnet_10_23dataset.pth"
+    pretrained_sha256: "afa8055f3e47f4a18239495d92a7abc587902c69c31c743de2b2784653b72605"
+    source_url: "https://huggingface.co/TencentMedicalNet/MedicalNet-Resnet10"
+    freeze_bn_stats: false
+
+training:
+  vnext_graph_student: true
+  match_teacher_available: true
+  initialize_from_teacher: false
+  warmup_epochs: 0
+  encoder_lr: 0.00001
+  inherited_lr: 0.0001
+
+loss_weights:
+  vnext_kd_logit: 0.0
+  vnext_kd_roi: 0.0
+  vnext_kd_graph: 0.0
+  vnext_kd_prototype: 0.0
+
+runtime:
+  evaluate_test: false

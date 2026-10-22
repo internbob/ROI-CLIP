@@ -1,0 +1,45 @@
+# Full existing 29-variable clinical set. MMSE is explicitly absent.
+# This is an exploratory performance upper bound, not the primary imaging model.
+experiment_name: "CortexBridge-vNext-Graph-Student-S4C-Full29-NoMMSE-Gated"
+
+data:
+  clinical:
+    enabled: true
+    features:
+      - age
+      - education
+      - apoe
+      - animal
+      - gds
+      - lm_imm
+      - lm_del
+      - faq_BILLS
+      - faq_TAXES
+      - faq_SHOPPING
+      - faq_GAMES
+      - faq_STOVE
+      - faq_MEALPREP
+      - faq_EVENTS
+      - faq_PAYATTN
+      - faq_REMDATES
+      - faq_TRAVEL
+      - npiq_DEL
+      - npiq_HALL
+      - npiq_AGIT
+      - npiq_DEPD
+      - npiq_ANX
+      - npiq_ELAT
+      - npiq_APA
+      - npiq_DISN
+      - npiq_IRR
+      - npiq_MOT
+      - npiq_NITE
+      - npiq_APP
+
+model:
+  use_clinical: false
+  student_use_clinical: true
+  clinical_fusion_mode: "gated"
+
+runtime:
+  evaluate_test: false

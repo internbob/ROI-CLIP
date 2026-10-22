@@ -13,6 +13,22 @@
 !/evaluate.py
 !/evaluate_correspondence_audit.py
 !/audit_clinical_leakage.py
+!/audit_mri_only_graph_student.py
+!/audit_student_roi_bottleneck.py
+!/analyze_s4_clinical_ablation.py
+!/recompute_ablation_classification_metrics.py
+!/run_graph_randomization.py
+!/summarize_graph_randomization.py
+!/summarize_graph_stage_a.py
+!/summarize_graph_student.py
+!/summarize_graph_student_components.py
+!/summarize_med3d_student_ablation.py
+!/summarize_roi_bottleneck_ablation.py
+!/__init__.py
+!/config.py
+!/metrics.py
+!/options.py
+!/utils.py
 !/docs/
 !/docs/**
 
@@ -31,6 +47,9 @@
 !/configs/runtime_vnext_phase2_1_p2b_cg_lambda001.yaml
 !/configs/runtime_vnext_phase2_1_p2b_cg_lambda005.yaml
 !/configs/runtime_vnext_phase2_1_p2b_cg_lambda010.yaml
+!/configs/runtime_vnext_graph_*.yaml
+!/configs/runtime_med3d_*.yaml
+!/configs/runtime_roi_bottleneck_*.yaml
 
 !/data/
 /data/*
@@ -42,6 +61,14 @@
 !/data/qc_ribbon_cache.py
 !/data/diagnose_ribbon_features.py
 !/data/dkt_topology.py
+!/data/__init__.py
+!/data/atlas_utils.py
+!/data/ico_utils.py
+!/data/mask_utils.py
+!/data/preprocess_cache.py
+!/data/pseudo_atlas.py
+!/data/surface_utils.py
+!/data/transforms.py
 
 !/tests/
 /tests/*
@@ -53,6 +80,14 @@
 !/tests/test_dkt_topology.py
 !/tests/test_correspondence_audit.py
 !/tests/test_clinical_leakage_audit.py
+!/tests/test_development_no_test_access.py
+!/tests/test_disease_aware_graph.py
+!/tests/test_global_residual_distillation.py
+!/tests/test_graph_randomization_gate.py
+!/tests/test_graph_stage_a_summary.py
+!/tests/test_medicalnet_student_adapter.py
+!/tests/test_multiclass_metrics.py
+!/tests/test_vnext_graph_student.py
 
 # 保留代码目录
 !/losses/
@@ -95,3 +130,47 @@
 **/.cache/
 **/tmp/
 **/temp/
+
+# 仅发布去标识化的汇总报告和模板拓扑资产；checkpoint、日志及逐受试者预测继续忽略
+!/outputs/
+/outputs/*
+!/outputs/vnext_phase1_20260930/
+/outputs/vnext_phase1_20260930/*
+!/outputs/vnext_phase1_20260930/PHASE1_GATE_REPORT.md
+!/outputs/vnext_phase1_1_20261001/
+/outputs/vnext_phase1_1_20261001/*
+!/outputs/vnext_phase1_1_20261001/PHASE1_1_REPORT.md
+!/outputs/vnext_phase2_1_20261002/
+/outputs/vnext_phase2_1_20261002/*
+!/outputs/vnext_phase2_1_20261002/PHASE2_1_REPORT.md
+!/outputs/vnext_phase2_1_5_20261003/
+/outputs/vnext_phase2_1_5_20261003/*
+!/outputs/vnext_phase2_1_5_20261003/PHASE2_1_5_CORRESPONDENCE_AUDIT.md
+!/outputs/vnext_phase2_1_5_20261003/mismatch_decomposition.csv
+!/outputs/vnext_phase2_1_5_20261003/roi_topology_comparison.csv
+!/outputs/vnext_phase2_1_5_20261003/true_dkt_topology.npz
+!/outputs/vnext_graph_stageA_20261019/
+/outputs/vnext_graph_stageA_20261019/*
+!/outputs/vnext_graph_stageA_20261019/GRAPH_RANDOMIZATION_REPORT.md
+!/outputs/vnext_graph_stageA_20261019/GRAPH_STAGE_A_REPORT.md
+!/outputs/vnext_graph_stageA_20261019/graph_fold_metrics.csv
+!/outputs/vnext_graph_student_20261019/
+/outputs/vnext_graph_student_20261019/*
+!/outputs/vnext_graph_student_20261019/GRAPH_STUDENT_COMPONENT_ABLATION_REPORT.md
+!/outputs/vnext_graph_student_20261019/GRAPH_STUDENT_REPORT.md
+!/outputs/vnext_graph_student_clinical_20261020/
+/outputs/vnext_graph_student_clinical_20261020/*
+!/outputs/vnext_graph_student_clinical_20261020/S4_CLINICAL_ASSISTED_ABLATION_REPORT.md
+!/outputs/vnext_med3d_resnet10_20261020/
+/outputs/vnext_med3d_resnet10_20261020/*
+!/outputs/vnext_med3d_resnet10_20261020/MED3D_RESNET10_STUDENT_ABLATION_REPORT.md
+!/outputs/vnext_med3d_resnet10_20261020/med3d_student_ablation_metrics.csv
+!/outputs/vnext_roi_bottleneck_ablation_20261021/
+/outputs/vnext_roi_bottleneck_ablation_20261021/*
+!/outputs/vnext_roi_bottleneck_ablation_20261021/ROI_BOTTLENECK_ABLATION_REPORT.md
+!/outputs/vnext_roi_bottleneck_ablation_20261021/roi_bottleneck_ablation_metrics.csv
+!/outputs/vnext_classification_metric_recalculation_20261020/
+/outputs/vnext_classification_metric_recalculation_20261020/*
+!/outputs/vnext_classification_metric_recalculation_20261020/ABLATION_CLASSIFICATION_METRICS_REPORT.md
+!/outputs/vnext_classification_metric_recalculation_20261020/classification_metrics_summary.csv
+!/outputs/vnext_classification_metric_recalculation_20261020/classification_metrics_per_class_summary.csv

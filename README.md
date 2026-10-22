@@ -194,10 +194,14 @@ python evaluate.py --checkpoint /path/to/fold_0/best_student.pt --fold 0
 - logit + graph-enhanced ROI-state distillation（development-locked S4）
 - ROI attention 可视化脚本
 
-开发集 progressive ablation 已完成。S4 在 matched 三折中具有最高 mean MCC，因而锁定
-`configs/runtime_vnext_graph_student_locked_s4.yaml`；graph-relation KD 与
-prototype-posterior KD 不再进入主配置。所有选择均未读取 held-out test。详细证据见：
+开发集 progressive ablation、Med3D adapter 以及 ROI bottleneck 消融均已完成。最新的
+B0–B4 配对重训表明，Student 的 ROI 分类残差会削弱最终分类；因此修订后的严格 MRI-only
+主线是 **B1：global MRI classifier + locked G3 Teacher logit KD**，关闭 Student ROI
+classification residual 和 Student ROI graph。Cross-geometry、DKT graph 与 ROI-state
+supervision 仍保留在 privileged Teacher、表征分析和消融证据中，但不直接进入最终 Student
+分类路径。所有选择均未读取 held-out test。详细证据见：
 
+- `outputs/vnext_roi_bottleneck_ablation_20261021/ROI_BOTTLENECK_ABLATION_REPORT.md`
 - `outputs/vnext_graph_student_20261019/GRAPH_STUDENT_COMPONENT_ABLATION_REPORT.md`
 - `docs/CortexBridge_vNext_Journal_Method_Status_and_Experiment_Roadmap.md`
 

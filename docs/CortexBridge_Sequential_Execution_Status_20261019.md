@@ -230,3 +230,29 @@ C3 相对 cognition/FAQ clinical-only 没有 MCC 优势且 AUC 更低；C4 相�
 - 机器可读结果：`med3d_student_ablation_summary.json` 与 `med3d_student_ablation_metrics.csv`。
 
 该阶段不改变已锁定的论文主方法：`CortexBridge S4-MRI` 仍为 MRI-only 核心，`CortexBridge S4-C` 仍为不含 MMSE 的临床辅助扩展。
+
+## 已完成：ROI bottleneck D0–D4 / B0–B4 消融（修订 MRI-only 主线）
+
+针对“deep feature 经 ROI token 再进 graph 会削弱分类”的假设，完成两组互补实验：D0–D4 在已有 S3/S4 checkpoint 内切换推理分支，不重新训练；B0–B4 使用相同 G3 Teacher、fold、seed、优化器、MCC 早停标准做三折配对重训。B2–B4 的分类器使用未归一化 raw ROI token，归一化副本仅供 ROI-state KD，从而排除单位范数分类瓶颈这一混杂因素。
+
+| ID | 配置 | MCC | AUC | ACC | 结论 |
+|---|---|---:|---:|---:|---|
+| B0 | global CE | `0.24877 ± 0.03390` | `0.70297 ± 0.02411` | `0.49787 ± 0.01048` | 无蒸馏基线 |
+| **B1** | **global CE + logit KD** | **`0.32870 ± 0.03922`** | **`0.74623 ± 0.02770`** | **`0.56490 ± 0.04083`** | **修订后的 MRI-only Student 主线** |
+| B2 | B1 + raw ROI classifier | `0.25861 ± 0.04353` | `0.72076 ± 0.02814` | `0.52378 ± 0.05136` | ROI 分类残差稳定有害 |
+| B3 | B2 + ROI graph | `0.25133 ± 0.03680` | `0.70350 ± 0.04079` | `0.49369 ± 0.05418` | graph 不是主要损失来源 |
+| B4 | B3 + ROI-state KD | `0.31729 ± 0.03137` | `0.74272 ± 0.02342` | `0.54726 ± 0.02830` | 恢复 B3，但未超过 B1 |
+
+关键因果对照：
+
+- B1−B0：三折均提升，mean ΔMCC `+0.07993`，pooled 95% CI `[+0.03633,+0.12456]`；
+- B2−B1：三折均下降，mean ΔMCC `−0.07009`，pooled 95% CI `[−0.10959,−0.02818]`；
+- B3−B2：mean ΔMCC `−0.00728`，95% CI `[−0.04683,+0.03462]`，graph 增量不确定；
+- B4−B3：mean ΔMCC `+0.06596`，95% CI `[+0.01712,+0.10807]`，ROI-state KD 能恢复 ROI 表征；
+- B4−B1：mean ΔMCC `−0.01141`，95% CI `[−0.04713,+0.02192]`，完整 ROI 路径没有证据优于更简单的 B1。
+
+D 审计提供一致证据：S4 global-only 的 mean MCC 为 `0.32201`，高于当前 fused S4 的 `0.31227`；ROI-only MCC 为 `0`；绕过 graph 几乎不改变 fused 结果。graph residual 仅约 token norm 的 `5.9%`，因此主要瓶颈是弱 ROI logits 被融合回分类器，而不是 graph 本身或 ROI-state 表征学习对全局 encoder 的损伤。
+
+据此，MRI-only Student 的修订主线为：**global MRI classifier + locked G3 Teacher logit KD；关闭 Student ROI classification residual 与 Student ROI graph。** Cross-geometry/ROI graph 仍保留在 privileged Teacher、表征分析和消融叙事中，但不再作为 Student 最终分类路径。旧 S4-C 临床扩展建立在 fused S4 上；如将临床扩展纳入最终论文主表，需在冻结 test 前补做 `B1 + C2 safe-neuro` 的严格配对验证，不能直接把旧 C2 增益转移到 B1。
+
+完整报告：`outputs/vnext_roi_bottleneck_ablation_20261021/ROI_BOTTLENECK_ABLATION_REPORT.md`。15 个 B0–B4 fold 均为 development-only，held-out test 始终未加载；相关回归测试 `16 passed`。

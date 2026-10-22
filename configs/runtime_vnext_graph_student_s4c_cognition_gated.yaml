@@ -1,0 +1,29 @@
+# High label-proximity sensitivity arm. Not eligible as the primary imaging claim.
+# Explicitly excludes MMSE.
+experiment_name: "CortexBridge-vNext-Graph-Student-S4C-Cognition-Gated"
+
+data:
+  clinical:
+    enabled: true
+    features:
+      - animal
+      - lm_imm
+      - lm_del
+      - faq_BILLS
+      - faq_TAXES
+      - faq_SHOPPING
+      - faq_GAMES
+      - faq_STOVE
+      - faq_MEALPREP
+      - faq_EVENTS
+      - faq_PAYATTN
+      - faq_REMDATES
+      - faq_TRAVEL
+
+model:
+  use_clinical: false
+  student_use_clinical: true
+  clinical_fusion_mode: "gated"
+
+runtime:
+  evaluate_test: false
