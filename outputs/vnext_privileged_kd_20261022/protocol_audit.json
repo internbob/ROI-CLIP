@@ -1,0 +1,671 @@
+{
+  "held_out_test_read": false,
+  "folds": [
+    0,
+    1,
+    2
+  ],
+  "protocol": {
+    "safe_features": [
+      "age",
+      "education",
+      "apoe",
+      "gds",
+      "npiq_DEL",
+      "npiq_HALL",
+      "npiq_AGIT",
+      "npiq_DEPD",
+      "npiq_ANX",
+      "npiq_ELAT",
+      "npiq_APA",
+      "npiq_DISN",
+      "npiq_IRR",
+      "npiq_MOT",
+      "npiq_NITE",
+      "npiq_APP"
+    ],
+    "forbidden_features_present": [],
+    "all_evaluate_test_false": true,
+    "student_inference_inputs": [
+      "MRI"
+    ],
+    "student_roi_classifier_enabled": false,
+    "student_roi_graph_enabled": false,
+    "kd": {
+      "kind": "logit_KL",
+      "temperature": 4.0,
+      "weight": 0.5
+    },
+    "p2_teacher": "MRI + safe clinical; no surface/ribbon/ROI graph",
+    "p3_teacher": "MRI + surface + ribbon correspondence + DKT graph + safe clinical"
+  },
+  "split_audits": [
+    {
+      "fold": 0,
+      "train_rows": 1433,
+      "valid_rows": 454,
+      "train_patients": 1433,
+      "valid_patients": 454,
+      "train_duplicate_visits": 0,
+      "valid_duplicate_visits": 0,
+      "train_valid_visit_overlap": 0,
+      "train_valid_patient_overlap": 0,
+      "train_feature_audit": {
+        "age": {
+          "observed": 1433,
+          "missing": 0,
+          "nonnumeric": 0,
+          "missing_fraction": 0.0
+        },
+        "education": {
+          "observed": 1433,
+          "missing": 0,
+          "nonnumeric": 0,
+          "missing_fraction": 0.0
+        },
+        "apoe": {
+          "observed": 1332,
+          "missing": 101,
+          "nonnumeric": 0,
+          "missing_fraction": 0.07048150732728542
+        },
+        "gds": {
+          "observed": 1432,
+          "missing": 1,
+          "nonnumeric": 0,
+          "missing_fraction": 0.0006978367062107466
+        },
+        "npiq_DEL": {
+          "observed": 1422,
+          "missing": 11,
+          "nonnumeric": 0,
+          "missing_fraction": 0.007676203768318213
+        },
+        "npiq_HALL": {
+          "observed": 1422,
+          "missing": 11,
+          "nonnumeric": 0,
+          "missing_fraction": 0.007676203768318213
+        },
+        "npiq_AGIT": {
+          "observed": 1422,
+          "missing": 11,
+          "nonnumeric": 0,
+          "missing_fraction": 0.007676203768318213
+        },
+        "npiq_DEPD": {
+          "observed": 1422,
+          "missing": 11,
+          "nonnumeric": 0,
+          "missing_fraction": 0.007676203768318213
+        },
+        "npiq_ANX": {
+          "observed": 1421,
+          "missing": 12,
+          "nonnumeric": 0,
+          "missing_fraction": 0.00837404047452896
+        },
+        "npiq_ELAT": {
+          "observed": 1421,
+          "missing": 12,
+          "nonnumeric": 0,
+          "missing_fraction": 0.00837404047452896
+        },
+        "npiq_APA": {
+          "observed": 1422,
+          "missing": 11,
+          "nonnumeric": 0,
+          "missing_fraction": 0.007676203768318213
+        },
+        "npiq_DISN": {
+          "observed": 1422,
+          "missing": 11,
+          "nonnumeric": 0,
+          "missing_fraction": 0.007676203768318213
+        },
+        "npiq_IRR": {
+          "observed": 1421,
+          "missing": 12,
+          "nonnumeric": 0,
+          "missing_fraction": 0.00837404047452896
+        },
+        "npiq_MOT": {
+          "observed": 1421,
+          "missing": 12,
+          "nonnumeric": 0,
+          "missing_fraction": 0.00837404047452896
+        },
+        "npiq_NITE": {
+          "observed": 1417,
+          "missing": 16,
+          "nonnumeric": 0,
+          "missing_fraction": 0.011165387299371946
+        },
+        "npiq_APP": {
+          "observed": 1422,
+          "missing": 11,
+          "nonnumeric": 0,
+          "missing_fraction": 0.007676203768318213
+        }
+      },
+      "valid_feature_audit": {
+        "age": {
+          "observed": 454,
+          "missing": 0,
+          "nonnumeric": 0,
+          "missing_fraction": 0.0
+        },
+        "education": {
+          "observed": 454,
+          "missing": 0,
+          "nonnumeric": 0,
+          "missing_fraction": 0.0
+        },
+        "apoe": {
+          "observed": 424,
+          "missing": 30,
+          "nonnumeric": 0,
+          "missing_fraction": 0.06607929515418502
+        },
+        "gds": {
+          "observed": 454,
+          "missing": 0,
+          "nonnumeric": 0,
+          "missing_fraction": 0.0
+        },
+        "npiq_DEL": {
+          "observed": 452,
+          "missing": 2,
+          "nonnumeric": 0,
+          "missing_fraction": 0.004405286343612335
+        },
+        "npiq_HALL": {
+          "observed": 452,
+          "missing": 2,
+          "nonnumeric": 0,
+          "missing_fraction": 0.004405286343612335
+        },
+        "npiq_AGIT": {
+          "observed": 452,
+          "missing": 2,
+          "nonnumeric": 0,
+          "missing_fraction": 0.004405286343612335
+        },
+        "npiq_DEPD": {
+          "observed": 452,
+          "missing": 2,
+          "nonnumeric": 0,
+          "missing_fraction": 0.004405286343612335
+        },
+        "npiq_ANX": {
+          "observed": 452,
+          "missing": 2,
+          "nonnumeric": 0,
+          "missing_fraction": 0.004405286343612335
+        },
+        "npiq_ELAT": {
+          "observed": 452,
+          "missing": 2,
+          "nonnumeric": 0,
+          "missing_fraction": 0.004405286343612335
+        },
+        "npiq_APA": {
+          "observed": 452,
+          "missing": 2,
+          "nonnumeric": 0,
+          "missing_fraction": 0.004405286343612335
+        },
+        "npiq_DISN": {
+          "observed": 452,
+          "missing": 2,
+          "nonnumeric": 0,
+          "missing_fraction": 0.004405286343612335
+        },
+        "npiq_IRR": {
+          "observed": 452,
+          "missing": 2,
+          "nonnumeric": 0,
+          "missing_fraction": 0.004405286343612335
+        },
+        "npiq_MOT": {
+          "observed": 452,
+          "missing": 2,
+          "nonnumeric": 0,
+          "missing_fraction": 0.004405286343612335
+        },
+        "npiq_NITE": {
+          "observed": 451,
+          "missing": 3,
+          "nonnumeric": 0,
+          "missing_fraction": 0.006607929515418502
+        },
+        "npiq_APP": {
+          "observed": 452,
+          "missing": 2,
+          "nonnumeric": 0,
+          "missing_fraction": 0.004405286343612335
+        }
+      }
+    },
+    {
+      "fold": 1,
+      "train_rows": 1428,
+      "valid_rows": 461,
+      "train_patients": 1428,
+      "valid_patients": 461,
+      "train_duplicate_visits": 0,
+      "valid_duplicate_visits": 0,
+      "train_valid_visit_overlap": 0,
+      "train_valid_patient_overlap": 0,
+      "train_feature_audit": {
+        "age": {
+          "observed": 1428,
+          "missing": 0,
+          "nonnumeric": 0,
+          "missing_fraction": 0.0
+        },
+        "education": {
+          "observed": 1428,
+          "missing": 0,
+          "nonnumeric": 0,
+          "missing_fraction": 0.0
+        },
+        "apoe": {
+          "observed": 1323,
+          "missing": 105,
+          "nonnumeric": 0,
+          "missing_fraction": 0.07352941176470588
+        },
+        "gds": {
+          "observed": 1428,
+          "missing": 0,
+          "nonnumeric": 0,
+          "missing_fraction": 0.0
+        },
+        "npiq_DEL": {
+          "observed": 1420,
+          "missing": 8,
+          "nonnumeric": 0,
+          "missing_fraction": 0.0056022408963585435
+        },
+        "npiq_HALL": {
+          "observed": 1420,
+          "missing": 8,
+          "nonnumeric": 0,
+          "missing_fraction": 0.0056022408963585435
+        },
+        "npiq_AGIT": {
+          "observed": 1420,
+          "missing": 8,
+          "nonnumeric": 0,
+          "missing_fraction": 0.0056022408963585435
+        },
+        "npiq_DEPD": {
+          "observed": 1420,
+          "missing": 8,
+          "nonnumeric": 0,
+          "missing_fraction": 0.0056022408963585435
+        },
+        "npiq_ANX": {
+          "observed": 1420,
+          "missing": 8,
+          "nonnumeric": 0,
+          "missing_fraction": 0.0056022408963585435
+        },
+        "npiq_ELAT": {
+          "observed": 1420,
+          "missing": 8,
+          "nonnumeric": 0,
+          "missing_fraction": 0.0056022408963585435
+        },
+        "npiq_APA": {
+          "observed": 1420,
+          "missing": 8,
+          "nonnumeric": 0,
+          "missing_fraction": 0.0056022408963585435
+        },
+        "npiq_DISN": {
+          "observed": 1420,
+          "missing": 8,
+          "nonnumeric": 0,
+          "missing_fraction": 0.0056022408963585435
+        },
+        "npiq_IRR": {
+          "observed": 1420,
+          "missing": 8,
+          "nonnumeric": 0,
+          "missing_fraction": 0.0056022408963585435
+        },
+        "npiq_MOT": {
+          "observed": 1420,
+          "missing": 8,
+          "nonnumeric": 0,
+          "missing_fraction": 0.0056022408963585435
+        },
+        "npiq_NITE": {
+          "observed": 1416,
+          "missing": 12,
+          "nonnumeric": 0,
+          "missing_fraction": 0.008403361344537815
+        },
+        "npiq_APP": {
+          "observed": 1420,
+          "missing": 8,
+          "nonnumeric": 0,
+          "missing_fraction": 0.0056022408963585435
+        }
+      },
+      "valid_feature_audit": {
+        "age": {
+          "observed": 461,
+          "missing": 0,
+          "nonnumeric": 0,
+          "missing_fraction": 0.0
+        },
+        "education": {
+          "observed": 461,
+          "missing": 0,
+          "nonnumeric": 0,
+          "missing_fraction": 0.0
+        },
+        "apoe": {
+          "observed": 430,
+          "missing": 31,
+          "nonnumeric": 0,
+          "missing_fraction": 0.06724511930585683
+        },
+        "gds": {
+          "observed": 461,
+          "missing": 0,
+          "nonnumeric": 0,
+          "missing_fraction": 0.0
+        },
+        "npiq_DEL": {
+          "observed": 456,
+          "missing": 5,
+          "nonnumeric": 0,
+          "missing_fraction": 0.010845986984815618
+        },
+        "npiq_HALL": {
+          "observed": 456,
+          "missing": 5,
+          "nonnumeric": 0,
+          "missing_fraction": 0.010845986984815618
+        },
+        "npiq_AGIT": {
+          "observed": 456,
+          "missing": 5,
+          "nonnumeric": 0,
+          "missing_fraction": 0.010845986984815618
+        },
+        "npiq_DEPD": {
+          "observed": 456,
+          "missing": 5,
+          "nonnumeric": 0,
+          "missing_fraction": 0.010845986984815618
+        },
+        "npiq_ANX": {
+          "observed": 456,
+          "missing": 5,
+          "nonnumeric": 0,
+          "missing_fraction": 0.010845986984815618
+        },
+        "npiq_ELAT": {
+          "observed": 456,
+          "missing": 5,
+          "nonnumeric": 0,
+          "missing_fraction": 0.010845986984815618
+        },
+        "npiq_APA": {
+          "observed": 456,
+          "missing": 5,
+          "nonnumeric": 0,
+          "missing_fraction": 0.010845986984815618
+        },
+        "npiq_DISN": {
+          "observed": 456,
+          "missing": 5,
+          "nonnumeric": 0,
+          "missing_fraction": 0.010845986984815618
+        },
+        "npiq_IRR": {
+          "observed": 456,
+          "missing": 5,
+          "nonnumeric": 0,
+          "missing_fraction": 0.010845986984815618
+        },
+        "npiq_MOT": {
+          "observed": 456,
+          "missing": 5,
+          "nonnumeric": 0,
+          "missing_fraction": 0.010845986984815618
+        },
+        "npiq_NITE": {
+          "observed": 455,
+          "missing": 6,
+          "nonnumeric": 0,
+          "missing_fraction": 0.013015184381778741
+        },
+        "npiq_APP": {
+          "observed": 456,
+          "missing": 5,
+          "nonnumeric": 0,
+          "missing_fraction": 0.010845986984815618
+        }
+      }
+    },
+    {
+      "fold": 2,
+      "train_rows": 1408,
+      "valid_rows": 470,
+      "train_patients": 1408,
+      "valid_patients": 470,
+      "train_duplicate_visits": 0,
+      "valid_duplicate_visits": 0,
+      "train_valid_visit_overlap": 0,
+      "train_valid_patient_overlap": 0,
+      "train_feature_audit": {
+        "age": {
+          "observed": 1408,
+          "missing": 0,
+          "nonnumeric": 0,
+          "missing_fraction": 0.0
+        },
+        "education": {
+          "observed": 1408,
+          "missing": 0,
+          "nonnumeric": 0,
+          "missing_fraction": 0.0
+        },
+        "apoe": {
+          "observed": 1311,
+          "missing": 97,
+          "nonnumeric": 0,
+          "missing_fraction": 0.06889204545454546
+        },
+        "gds": {
+          "observed": 1408,
+          "missing": 0,
+          "nonnumeric": 0,
+          "missing_fraction": 0.0
+        },
+        "npiq_DEL": {
+          "observed": 1400,
+          "missing": 8,
+          "nonnumeric": 0,
+          "missing_fraction": 0.005681818181818182
+        },
+        "npiq_HALL": {
+          "observed": 1400,
+          "missing": 8,
+          "nonnumeric": 0,
+          "missing_fraction": 0.005681818181818182
+        },
+        "npiq_AGIT": {
+          "observed": 1400,
+          "missing": 8,
+          "nonnumeric": 0,
+          "missing_fraction": 0.005681818181818182
+        },
+        "npiq_DEPD": {
+          "observed": 1400,
+          "missing": 8,
+          "nonnumeric": 0,
+          "missing_fraction": 0.005681818181818182
+        },
+        "npiq_ANX": {
+          "observed": 1400,
+          "missing": 8,
+          "nonnumeric": 0,
+          "missing_fraction": 0.005681818181818182
+        },
+        "npiq_ELAT": {
+          "observed": 1400,
+          "missing": 8,
+          "nonnumeric": 0,
+          "missing_fraction": 0.005681818181818182
+        },
+        "npiq_APA": {
+          "observed": 1400,
+          "missing": 8,
+          "nonnumeric": 0,
+          "missing_fraction": 0.005681818181818182
+        },
+        "npiq_DISN": {
+          "observed": 1400,
+          "missing": 8,
+          "nonnumeric": 0,
+          "missing_fraction": 0.005681818181818182
+        },
+        "npiq_IRR": {
+          "observed": 1400,
+          "missing": 8,
+          "nonnumeric": 0,
+          "missing_fraction": 0.005681818181818182
+        },
+        "npiq_MOT": {
+          "observed": 1400,
+          "missing": 8,
+          "nonnumeric": 0,
+          "missing_fraction": 0.005681818181818182
+        },
+        "npiq_NITE": {
+          "observed": 1397,
+          "missing": 11,
+          "nonnumeric": 0,
+          "missing_fraction": 0.0078125
+        },
+        "npiq_APP": {
+          "observed": 1400,
+          "missing": 8,
+          "nonnumeric": 0,
+          "missing_fraction": 0.005681818181818182
+        }
+      },
+      "valid_feature_audit": {
+        "age": {
+          "observed": 470,
+          "missing": 0,
+          "nonnumeric": 0,
+          "missing_fraction": 0.0
+        },
+        "education": {
+          "observed": 470,
+          "missing": 0,
+          "nonnumeric": 0,
+          "missing_fraction": 0.0
+        },
+        "apoe": {
+          "observed": 444,
+          "missing": 26,
+          "nonnumeric": 0,
+          "missing_fraction": 0.05531914893617021
+        },
+        "gds": {
+          "observed": 469,
+          "missing": 1,
+          "nonnumeric": 0,
+          "missing_fraction": 0.002127659574468085
+        },
+        "npiq_DEL": {
+          "observed": 465,
+          "missing": 5,
+          "nonnumeric": 0,
+          "missing_fraction": 0.010638297872340425
+        },
+        "npiq_HALL": {
+          "observed": 465,
+          "missing": 5,
+          "nonnumeric": 0,
+          "missing_fraction": 0.010638297872340425
+        },
+        "npiq_AGIT": {
+          "observed": 465,
+          "missing": 5,
+          "nonnumeric": 0,
+          "missing_fraction": 0.010638297872340425
+        },
+        "npiq_DEPD": {
+          "observed": 465,
+          "missing": 5,
+          "nonnumeric": 0,
+          "missing_fraction": 0.010638297872340425
+        },
+        "npiq_ANX": {
+          "observed": 464,
+          "missing": 6,
+          "nonnumeric": 0,
+          "missing_fraction": 0.01276595744680851
+        },
+        "npiq_ELAT": {
+          "observed": 464,
+          "missing": 6,
+          "nonnumeric": 0,
+          "missing_fraction": 0.01276595744680851
+        },
+        "npiq_APA": {
+          "observed": 465,
+          "missing": 5,
+          "nonnumeric": 0,
+          "missing_fraction": 0.010638297872340425
+        },
+        "npiq_DISN": {
+          "observed": 465,
+          "missing": 5,
+          "nonnumeric": 0,
+          "missing_fraction": 0.010638297872340425
+        },
+        "npiq_IRR": {
+          "observed": 464,
+          "missing": 6,
+          "nonnumeric": 0,
+          "missing_fraction": 0.01276595744680851
+        },
+        "npiq_MOT": {
+          "observed": 464,
+          "missing": 6,
+          "nonnumeric": 0,
+          "missing_fraction": 0.01276595744680851
+        },
+        "npiq_NITE": {
+          "observed": 463,
+          "missing": 7,
+          "nonnumeric": 0,
+          "missing_fraction": 0.014893617021276596
+        },
+        "npiq_APP": {
+          "observed": 465,
+          "missing": 5,
+          "nonnumeric": 0,
+          "missing_fraction": 0.010638297872340425
+        }
+      }
+    }
+  ],
+  "clinical_preprocessing": {
+    "fit_scope": "training fold only",
+    "imputation": "training-fold mean",
+    "standardization": "training-fold mean/std",
+    "missingness": "one binary flag per feature"
+  }
+}

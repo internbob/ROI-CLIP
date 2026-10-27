@@ -108,10 +108,16 @@ def build_student(cfg):
         )
     )
     topology_query_cfg = getattr(cfg.model, "topology_query", {})
-    needs_topology = student_roi_graph_enabled or bool(
-        getattr(topology_query_cfg, "enabled", False)
+    topology_query_enabled = bool(getattr(topology_query_cfg, "enabled", False))
+    needs_topology = student_roi_graph_enabled or topology_query_enabled
+    # A global-only B1 Student can retain the locked topology-seeded query
+    # buffer even when its Teacher has no ROI graph (P2). Loading the template
+    # here does not enable a graph branch or expose non-MRI inputs at inference.
+    topology = (
+        load_roi_graph_topology(cfg, force=topology_query_enabled)
+        if needs_topology
+        else {}
     )
-    topology = load_roi_graph_topology(cfg) if needs_topology else {}
     topology_query_pe = build_topology_query_pe(cfg, topology)
     backbone_cfg = getattr(cfg.model, "student_backbone", {})
     return MRIOnlyStudent(
@@ -391,6 +397,21 @@ def distillation_enabled(cfg):
     return any(float(getattr(cfg.loss_weights, name, 0.0)) > 0.0 for name in names)
 
 
+def student_clinical_input(clinical_data, cfg):
+    """Return the Student clinical input, applying the locked shuffle control.
+
+    The Teacher always receives the correctly paired clinical vector.  For the
+    E5 control only, Student vectors are circularly shifted within each batch.
+    ``torch.roll`` is deterministic and does not consume the model RNG, so the
+    control does not alter dropout/augmentation random streams in matched runs.
+    """
+    if not bool(getattr(cfg.training, "student_clinical_shuffle", False)):
+        return clinical_data
+    if int(clinical_data.shape[0]) <= 1:
+        return clinical_data
+    return torch.roll(clinical_data, shifts=1, dims=0)
+
+
 def run_epoch(student, teacher, loader, optimizer, device, cfg, class_weights, train_mode, warmup=False, relation_weights=None):
     student.train(train_mode)
     if train_mode and warmup:
@@ -448,7 +469,10 @@ def run_epoch(student, teacher, loader, optimizer, device, cfg, class_weights, t
                     if bool(getattr(cfg.training, "control_shuffle_roi", False)):
                         teacher_outputs = shuffle_teacher_roi_outputs(teacher_outputs)
             if bool(getattr(cfg.model, "student_use_clinical", False)):
-                student_outputs = student(batch["image"], clinical_data=batch["clinical_data"])
+                student_outputs = student(
+                    batch["image"],
+                    clinical_data=student_clinical_input(batch["clinical_data"], cfg),
+                )
             else:
                 student_outputs = student(batch["image"])
 
@@ -458,15 +482,30 @@ def run_epoch(student, teacher, loader, optimizer, device, cfg, class_weights, t
             loss_token = spatial_zero
             loss_rel = spatial_zero
             loss_proto = spatial_zero
-            if teacher_outputs is not None:
+            kd_logit_weight = student_loss_weight(cfg, "vnext_kd_logit", "kd_logit")
+            kd_roi_weight = student_loss_weight(cfg, "vnext_kd_roi", "kd_token")
+            kd_graph_weight = student_loss_weight(cfg, "vnext_kd_graph", "kd_relation")
+            kd_prototype_weight = student_loss_weight(
+                cfg, "vnext_kd_prototype", "kd_prototype"
+            )
+            if teacher_outputs is not None and kd_logit_weight > 0.0:
                 loss_logit = kd_logit_loss(
                     teacher_outputs["logits"], student_outputs["logits"], temperature=cfg.temperature.kd
                 )
-                teacher_roi_target = teacher_outputs.get("z_teacher_graph", teacher_outputs["z_volume"])
+            if teacher_outputs is not None and kd_roi_weight > 0.0:
+                teacher_roi_target = teacher_outputs.get("z_teacher_graph")
+                if teacher_roi_target is None:
+                    teacher_roi_target = teacher_outputs.get("z_volume")
+                if teacher_roi_target is None:
+                    raise KeyError("ROI-state KD requires Teacher z_teacher_graph or z_volume")
                 loss_token = token_distill_loss(
                     teacher_roi_target, student_outputs["z_student_graph"]
                 )
-            if teacher_outputs is not None and teacher_outputs.get("cross_image_tokens") is not None:
+            if (
+                teacher_outputs is not None
+                and kd_roi_weight > 0.0
+                and teacher_outputs.get("cross_image_tokens") is not None
+            ):
                 loss_token = (
                     loss_token
                     + token_distill_loss(
@@ -494,7 +533,11 @@ def run_epoch(student, teacher, loader, optimizer, device, cfg, class_weights, t
             loss_roi_center = spatial_zero
             if roi_target is not None and float(getattr(cfg.loss_weights, "roi_center", 0.0)) > 0.0:
                 loss_roi_center = roi_center_correspondence_loss(student_outputs["attention_maps"], roi_target)
-            if teacher_outputs is not None and relation_weights is not None:
+            if (
+                teacher_outputs is not None
+                and kd_graph_weight > 0.0
+                and relation_weights is not None
+            ):
                 loss_rel = multiscale_relation_distill_loss(
                     teacher_outputs["relation"],
                     student_outputs["relation"],
@@ -503,20 +546,14 @@ def run_epoch(student, teacher, loader, optimizer, device, cfg, class_weights, t
                     local_scale=float(getattr(cfg.training, "relation_local_weight", 0.7)),
                     remote_scale=float(getattr(cfg.training, "relation_remote_weight", 0.3)),
                 )
-            elif teacher_outputs is not None:
+            elif teacher_outputs is not None and kd_graph_weight > 0.0:
                 loss_rel = relation_distill_loss(teacher_outputs["relation"], student_outputs["relation"])
-            if teacher_outputs is not None:
+            if teacher_outputs is not None and kd_prototype_weight > 0.0:
                 loss_proto = prototype_distill_loss(
                     teacher_outputs["prototype_logits"],
                     student_outputs["prototype_logits"],
                     temperature=1.0,
                 )
-            kd_logit_weight = student_loss_weight(cfg, "vnext_kd_logit", "kd_logit")
-            kd_roi_weight = student_loss_weight(cfg, "vnext_kd_roi", "kd_token")
-            kd_graph_weight = student_loss_weight(cfg, "vnext_kd_graph", "kd_relation")
-            kd_prototype_weight = student_loss_weight(
-                cfg, "vnext_kd_prototype", "kd_prototype"
-            )
             total_loss = (
                 float(cfg.loss_weights.ce) * loss_ce
                 + kd_logit_weight * loss_logit
@@ -610,6 +647,7 @@ def shuffle_teacher_roi_outputs(outputs):
         "z_surface",
         "z_volume",
         "z_teacher",
+        "z_teacher_graph",
         "surface_prototype_logits",
         "volume_prototype_logits",
         "prototype_logits",
@@ -637,14 +675,17 @@ def shuffle_teacher_roi_outputs(outputs):
     return shuffled
 
 
-def export_predictions(student, loader, device, csv_path, dry_run=False):
+def export_predictions(student, loader, device, csv_path, cfg, dry_run=False):
     student.eval()
     rows = []
     with torch.no_grad():
         for batch in loader:
             batch = move_to_device(batch, device)
             if bool(getattr(student, "use_clinical", False)):
-                outputs = student(batch["image"], clinical_data=batch["clinical_data"])
+                outputs = student(
+                    batch["image"],
+                    clinical_data=student_clinical_input(batch["clinical_data"], cfg),
+                )
             else:
                 outputs = student(batch["image"])
             probs = outputs["prob"].detach().cpu().numpy()
@@ -739,6 +780,10 @@ def main():
         logger.print_message(f"Teacher checkpoint: {teacher_label}")
         logger.print_message(
             f"Control flags: random_teacher={random_teacher_control} shuffle_roi={shuffle_roi_control}"
+        )
+        logger.print_message(
+            "Student clinical subject-shuffle control="
+            f"{bool(getattr(cfg.training, 'student_clinical_shuffle', False))}"
         )
         teacher = None
         if needs_teacher:
@@ -933,6 +978,7 @@ def main():
                 fold_dir,
                 "test_predictions.csv" if test_loader is not None else "validation_predictions.csv",
             ),
+            cfg=cfg,
             dry_run=bool(cfg.runtime.dry_run),
         )
         results.append(evaluation_metrics)

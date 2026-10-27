@@ -15,6 +15,7 @@
 !/audit_clinical_leakage.py
 !/audit_mri_only_graph_student.py
 !/audit_student_roi_bottleneck.py
+!/audit_privileged_kd_protocol.py
 !/analyze_s4_clinical_ablation.py
 !/recompute_ablation_classification_metrics.py
 !/run_graph_randomization.py
@@ -24,6 +25,12 @@
 !/summarize_graph_student_components.py
 !/summarize_med3d_student_ablation.py
 !/summarize_roi_bottleneck_ablation.py
+!/summarize_privileged_kd.py
+!/evaluate_unified_clinical_missingness.py
+!/summarize_unified_clinical.py
+!/run_unified_clinical_students.sh
+!/summarize_clinical_two_level_kd.py
+!/run_clinical_two_level_kd.sh
 !/__init__.py
 !/config.py
 !/metrics.py
@@ -50,6 +57,9 @@
 !/configs/runtime_vnext_graph_*.yaml
 !/configs/runtime_med3d_*.yaml
 !/configs/runtime_roi_bottleneck_*.yaml
+!/configs/runtime_privileged_*.yaml
+!/configs/runtime_unified_*.yaml
+!/configs/runtime_clinical_two_level_*.yaml
 
 !/data/
 /data/*
@@ -88,6 +98,9 @@
 !/tests/test_medicalnet_student_adapter.py
 !/tests/test_multiclass_metrics.py
 !/tests/test_vnext_graph_student.py
+!/tests/test_privileged_kd_protocol.py
+!/tests/test_privileged_kd_summary.py
+!/tests/test_unified_clinical_protocol.py
 
 # 保留代码目录
 !/losses/
@@ -174,3 +187,35 @@
 !/outputs/vnext_classification_metric_recalculation_20261020/ABLATION_CLASSIFICATION_METRICS_REPORT.md
 !/outputs/vnext_classification_metric_recalculation_20261020/classification_metrics_summary.csv
 !/outputs/vnext_classification_metric_recalculation_20261020/classification_metrics_per_class_summary.csv
+!/outputs/vnext_privileged_kd_20261022/
+/outputs/vnext_privileged_kd_20261022/*
+!/outputs/vnext_privileged_kd_20261022/PROTOCOL_AUDIT.md
+!/outputs/vnext_privileged_kd_20261022/protocol_audit.json
+!/outputs/vnext_privileged_kd_20261022/PRIVILEGED_KD_P2_P3_REPORT.md
+!/outputs/vnext_privileged_kd_20261022/privileged_kd_summary.json
+!/outputs/vnext_privileged_kd_20261022/privileged_kd_fold_metrics.csv
+!/outputs/vnext_unified_clinical_20261023/
+/outputs/vnext_unified_clinical_20261023/*
+!/outputs/vnext_unified_clinical_20261023/UNIFIED_CLINICAL_COMPARISON_REPORT.md
+!/outputs/vnext_unified_clinical_20261023/analysis/
+/outputs/vnext_unified_clinical_20261023/analysis/*
+!/outputs/vnext_unified_clinical_20261023/analysis/*.csv
+!/outputs/vnext_unified_clinical_20261023/analysis/*.json
+!/outputs/vnext_unified_clinical_20261023/missingness_audit/
+/outputs/vnext_unified_clinical_20261023/missingness_audit/*
+!/outputs/vnext_unified_clinical_20261023/missingness_audit/MISSINGNESS_AUDIT.md
+!/outputs/vnext_unified_clinical_20261023/missingness_audit/missingness_metrics_by_fold.csv
+!/outputs/vnext_unified_clinical_20261023/missingness_audit/missingness_metrics_summary.csv
+!/outputs/vnext_unified_clinical_20261023/missingness_audit/real_missingness_strata.csv
+!/outputs/vnext_unified_clinical_20261023/missingness_audit/real_missingness_strata_pooled.csv
+!/outputs/vnext_unified_clinical_20261023/missingness_audit/*.json
+!/outputs/vnext_clinical_two_level_kd_20261027/
+/outputs/vnext_clinical_two_level_kd_20261027/*
+!/outputs/vnext_clinical_two_level_kd_20261027/CLINICAL_TWO_LEVEL_KD_REPORT.md
+!/outputs/vnext_clinical_two_level_kd_20261027/lambda_selection.json
+!/outputs/vnext_clinical_two_level_kd_20261027/analysis/
+/outputs/vnext_clinical_two_level_kd_20261027/analysis/*
+!/outputs/vnext_clinical_two_level_kd_20261027/analysis/metrics_by_fold.csv
+!/outputs/vnext_clinical_two_level_kd_20261027/analysis/metrics_summary.csv
+!/outputs/vnext_clinical_two_level_kd_20261027/analysis/paired_comparisons.csv
+!/outputs/vnext_clinical_two_level_kd_20261027/analysis/analysis.json

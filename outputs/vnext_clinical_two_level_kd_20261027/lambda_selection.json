@@ -1,0 +1,31 @@
+{
+  "selection_fold": 0,
+  "selection_metric": "mcc",
+  "tie_breakers": ["auc", "smaller_lambda"],
+  "selected_lambda": 1.0,
+  "selected_run": "lambda_sweep_roi100",
+  "held_out_test_accessed": false,
+  "candidates": [
+    {
+      "lambda_roi": 0.1,
+      "mcc": 0.7098594701561789,
+      "auc": 0.9351263548197593,
+      "acc": 0.8149779735682819,
+      "f1_macro": 0.80944622100401
+    },
+    {
+      "lambda_roi": 0.5,
+      "mcc": 0.7086598104311125,
+      "auc": 0.9345992505820253,
+      "acc": 0.8149779735682819,
+      "f1_macro": 0.8083785617367706
+    },
+    {
+      "lambda_roi": 1.0,
+      "mcc": 0.7107901701736322,
+      "auc": 0.932652172213816,
+      "acc": 0.8127753303964758,
+      "f1_macro": 0.8086530162378467
+    }
+  ]
+}

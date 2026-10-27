@@ -1,0 +1,18 @@
+experiment_name: "CortexBridge-Unified-E3-MRI-Clinical-Teacher"
+
+model:
+  method: "cortexbridge-unified-e3-mri-clinical-teacher"
+  use_roi_branch: false
+  use_clinical: true
+  student_use_clinical: true
+  cross_geometry:
+    enabled: false
+    lambda_cg: 0.0
+  roi_graph:
+    enabled: false
+
+loss_weights:
+  ce: 1.0
+  roi_clip: 0.01
+  prototype: 0.01
+  relation: 0.005

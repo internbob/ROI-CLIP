@@ -1,0 +1,19 @@
+# Shared Student architecture for the final clinical two-level KD ablation.
+# Load this after the E4/E6 Teacher configuration so these Student overrides win.
+model:
+  student_roi_classifier:
+    enabled: false
+    use_raw_tokens: true
+  student_roi_graph:
+    enabled: true
+  topology_query:
+    enabled: true
+    components: 16
+    include_homology: true
+    trainable_residual: true
+
+training:
+  control_shuffle_roi: false
+
+runtime:
+  evaluate_test: false

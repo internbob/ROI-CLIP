@@ -1,0 +1,26 @@
+experiment_name: "CortexBridge-Unified-E1-MRI-CE"
+
+model:
+  method: "cortexbridge-unified-e1-mri-ce"
+  use_clinical: false
+  student_use_clinical: false
+  cross_geometry:
+    enabled: false
+    lambda_cg: 0.0
+  roi_graph:
+    enabled: false
+
+loss_weights: &student_ce_only
+  ce: 1.0
+  kd_logit: 0.0
+  kd_token: 0.0
+  kd_attention: 0.0
+  kd_relation: 0.0
+  kd_prototype: 0.0
+  vnext_kd_logit: 0.0
+  vnext_kd_roi: 0.0
+  vnext_kd_graph: 0.0
+  vnext_kd_prototype: 0.0
+  roi_attention_mass: 0.0
+  roi_occupancy: 0.0
+  roi_center: 0.0

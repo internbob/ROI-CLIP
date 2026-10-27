@@ -169,9 +169,9 @@ def build_roi_clip_affinity(
     return torch.from_numpy(affinity.astype(np.float32))
 
 
-def load_roi_graph_topology(cfg):
+def load_roi_graph_topology(cfg, force=False):
     graph_cfg = getattr(cfg.model, "roi_graph", {})
-    if not bool(getattr(graph_cfg, "enabled", False)):
+    if not bool(getattr(graph_cfg, "enabled", False)) and not bool(force):
         return {}
     topology_path = os.path.abspath(os.path.expanduser(str(getattr(graph_cfg, "topology_path", ""))))
     if not topology_path or not os.path.isfile(topology_path):

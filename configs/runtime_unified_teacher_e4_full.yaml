@@ -1,0 +1,30 @@
+experiment_name: "CortexBridge-Unified-E4-Full-Teacher"
+
+model:
+  method: "cortexbridge-unified-e4-full-teacher"
+  use_roi_branch: true
+  use_clinical: true
+  student_use_clinical: true
+  cross_geometry:
+    enabled: true
+    feature_stage: "high_res"
+    projection_dim: 128
+    temperature: 0.1
+    lambda_cg: 0.01
+    topology_metric_topk: 3
+  roi_graph:
+    enabled: true
+    topology_path: "/home_data/home/zhouwl2023/project/Cortexbridge/cortexweave_roiclip/outputs/vnext_phase2_1_5_20261003/true_dkt_topology.npz"
+    num_layers: 1
+    num_heads: 4
+    dropout: 0.1
+    residual_gate_init: 0.1
+    use_boundary_strength: true
+    use_homology: true
+    shuffle_topology_bias: false
+
+loss_weights:
+  ce: 1.0
+  roi_clip: 0.01
+  prototype: 0.01
+  relation: 0.005

@@ -1,11 +1,13 @@
 from types import SimpleNamespace
 
+import numpy as np
 import torch
 
 from config import load_configs
 from models.student import MRIOnlyStudent
 from options import Option
 from train_student import build_topology_query_pe, distillation_enabled
+from train_teacher import load_roi_graph_topology
 
 
 def _ring_topology(num_rois=6):
@@ -40,6 +42,31 @@ def test_topology_query_pe_is_deterministic_and_nonconstant():
     assert first.shape == (6, 3)
     assert torch.equal(first, second)
     assert torch.all(first.std(dim=0) > 0)
+
+
+def test_topology_can_be_loaded_for_locked_query_when_teacher_graph_is_disabled(tmp_path):
+    anatomy = np.zeros((3, 3), dtype=np.float32)
+    anatomy[0, 1] = anatomy[1, 0] = 1.0
+    anatomy[1, 2] = anatomy[2, 1] = 1.0
+    boundary = anatomy / np.maximum(anatomy.sum(axis=1, keepdims=True), 1.0)
+    homology = np.zeros_like(anatomy)
+    path = tmp_path / "topology.npz"
+    np.savez_compressed(path, A_anat=anatomy, A_boundary=boundary, A_hom=homology)
+    cfg = SimpleNamespace(
+        model=SimpleNamespace(
+            num_rois=3,
+            roi_graph=SimpleNamespace(
+                enabled=False,
+                topology_path=str(path),
+                shuffle_topology_bias=False,
+            ),
+        )
+    )
+
+    assert load_roi_graph_topology(cfg) == {}
+    forced = load_roi_graph_topology(cfg, force=True)
+    assert forced["anatomy_adjacency"].shape == (3, 3)
+    assert forced["path"] == str(path)
 
 
 def test_vnext_scratch_ignores_legacy_cli_kd_defaults():

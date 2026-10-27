@@ -205,6 +205,30 @@ supervision 仍保留在 privileged Teacher、表征分析和消融证据中，�
 - `outputs/vnext_graph_student_20261019/GRAPH_STUDENT_COMPONENT_ABLATION_REPORT.md`
 - `docs/CortexBridge_vNext_Journal_Method_Status_and_Experiment_Roadmap.md`
 
+## 统一 MRI–clinical 主线（development-locked）
+
+当部署端允许同时输入 MRI 与临床量表时，当前性能主线为 **E3**：Teacher 和 Student
+均使用 MRI 与同一组 29 个临床变量（不含 MMSE），Student 保留 global classifier，关闭
+ROI/graph classification residual，并接受 temperature-scaled logit KD。临床缺失值只使用
+训练折统计量拟合的填补器处理，同时保留 missingness indicator；受试者划分、预处理统计量
+和模型选择均严格限制在 development folds。
+
+完整的 privileged **E4** Teacher 在训练期额外使用 surface、ribbon cross-geometry
+correspondence 与 DKT graph。其 Logit + ROI-state 两层蒸馏版本 **D1** 已实现并完成三折实验，
+但目前没有显著优于 E3，因此 D1 作为机制消融保留，不能宣称为性能最优配置。E3 的三折
+development 结果为 MCC `0.69535`、AUC `0.93203`、ACC `0.80708`；D1 为 MCC
+`0.69413`、AUC `0.93082`、ACC `0.80706`。held-out test 尚未读取。
+
+相关可复现实验入口与小型聚合结果：
+
+- `run_unified_clinical_students.sh`
+- `run_clinical_two_level_kd.sh`
+- `outputs/vnext_unified_clinical_20261023/UNIFIED_CLINICAL_COMPARISON_REPORT.md`
+- `outputs/vnext_clinical_two_level_kd_20261027/CLINICAL_TWO_LEVEL_KD_REPORT.md`
+
+仓库只版本化聚合报告、配置和分析表；checkpoint、逐受试者预测、训练日志及本地 cache
+均不提交。
+
 当前没有做成强依赖：
 
 - 真正的 spherical CNN

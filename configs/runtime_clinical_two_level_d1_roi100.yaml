@@ -1,0 +1,14 @@
+experiment_name: "CortexBridge-Clinical-TwoLevel-D1-ROI100"
+
+model:
+  method: "clinical-e4-teacher-student-logit-roi-kd-lambda100"
+
+loss_weights:
+  ce: 1.0
+  vnext_kd_logit: 0.5
+  vnext_kd_roi: 1.0
+  vnext_kd_graph: 0.0
+  vnext_kd_prototype: 0.0
+
+runtime:
+  evaluate_test: false

@@ -1,0 +1,86 @@
+# Locked common protocol for E1-E6.  All arms use the same ADNI development
+# subjects and the same 29-variable clinical definition (MMSE excluded).
+experiment_name: "CortexBridge-Unified-Clinical-Common"
+
+data:
+  split_root: "/home_data/home/zhouwl2023/project/Cortexbridge/cortexweave_roiclip/lookupcsv-full-huashan-adni-teacher-clean"
+  allowed_subject_prefixes: ["sub-ADNI"]
+  clinical:
+    enabled: true
+    features: &full29_no_mmse
+      - age
+      - education
+      - apoe
+      - animal
+      - gds
+      - lm_imm
+      - lm_del
+      - faq_BILLS
+      - faq_TAXES
+      - faq_SHOPPING
+      - faq_GAMES
+      - faq_STOVE
+      - faq_MEALPREP
+      - faq_EVENTS
+      - faq_PAYATTN
+      - faq_REMDATES
+      - faq_TRAVEL
+      - npiq_DEL
+      - npiq_HALL
+      - npiq_AGIT
+      - npiq_DEPD
+      - npiq_ANX
+      - npiq_ELAT
+      - npiq_APA
+      - npiq_DISN
+      - npiq_IRR
+      - npiq_MOT
+      - npiq_NITE
+      - npiq_APP
+  mri_aug:
+    prob: 0.5
+    max_voxel_shift: 0
+    intensity_scale: 0.1
+    intensity_shift: 0.05
+    gamma: 0.1
+    noise_std: 0.01
+
+model:
+  clinical_fusion_mode: "gated"
+  clinical_hidden_dim: 256
+  clinical_dropout: 0.1
+  student_roi_classifier:
+    enabled: false
+    use_raw_tokens: true
+  student_roi_graph:
+    enabled: false
+  topology_query:
+    enabled: false
+  volume_pooling:
+    mode: "legacy_mask"
+  ribbon:
+    num_depths: 5
+    depths: [0.2, 0.35, 0.5, 0.65, 0.8]
+    depth_attention: false
+    feature_stage: "roi"
+
+training:
+  vnext_graph_student: true
+  match_teacher_available: true
+  initialize_from_teacher: false
+  warmup_epochs: 0
+  encoder_lr: 0.0001
+  inherited_lr: 0.0001
+  batch_size: 8
+  num_workers: 8
+  num_folds: 3
+  epochs: 30
+  early_stop_patience: 4
+  seed: 3407
+  selection_metric: "mcc"
+  class_weight_mode: "sqrt_balanced"
+  ce_warmup_epochs: 5
+  student_clinical_shuffle: false
+
+runtime:
+  evaluate_test: false

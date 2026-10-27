@@ -156,8 +156,10 @@ class Option:
             parser.add_argument("--warmup_epochs", type=int, default=None)
             parser.add_argument("--encoder_lr", type=float, default=None)
             parser.add_argument("--inherited_lr", type=float, default=None)
-            parser.add_argument("--control_random_teacher", action="store_true")
-            parser.add_argument("--control_shuffle_roi", action="store_true")
+            # None means "keep the YAML value".  A False argparse default
+            # silently disabled config-declared negative controls.
+            parser.add_argument("--control_random_teacher", action="store_true", default=None)
+            parser.add_argument("--control_shuffle_roi", action="store_true", default=None)
         return parser
 
     def _apply_overrides(self, cfg, args):
@@ -276,8 +278,10 @@ class Option:
                 _set_nested(cfg, "training.encoder_lr", args.encoder_lr)
             if args.inherited_lr is not None:
                 _set_nested(cfg, "training.inherited_lr", args.inherited_lr)
-            _set_nested(cfg, "training.control_random_teacher", bool(args.control_random_teacher))
-            _set_nested(cfg, "training.control_shuffle_roi", bool(args.control_shuffle_roi))
+            if args.control_random_teacher is not None:
+                _set_nested(cfg, "training.control_random_teacher", bool(args.control_random_teacher))
+            if args.control_shuffle_roi is not None:
+                _set_nested(cfg, "training.control_shuffle_roi", bool(args.control_shuffle_roi))
 
         return cfg
 

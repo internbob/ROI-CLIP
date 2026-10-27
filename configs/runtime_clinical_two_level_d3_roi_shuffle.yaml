@@ -1,0 +1,19 @@
+# Negative control: keep the clinical Teacher logits correct and shuffle only
+# the Teacher ROI axis used by ROI-state KD.
+experiment_name: "CortexBridge-Clinical-TwoLevel-D3-ROIShuffle"
+
+model:
+  method: "clinical-e4-teacher-student-logit-roi-kd-roi-shuffle-control"
+
+loss_weights:
+  ce: 1.0
+  vnext_kd_logit: 0.5
+  vnext_kd_roi: 1.0
+  vnext_kd_graph: 0.0
+  vnext_kd_prototype: 0.0
+
+training:
+  control_shuffle_roi: true
+
+runtime:
+  evaluate_test: false

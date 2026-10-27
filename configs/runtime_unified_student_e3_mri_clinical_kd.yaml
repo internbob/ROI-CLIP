@@ -1,0 +1,22 @@
+experiment_name: "CortexBridge-Unified-E3-MRI-Clinical-KD"
+
+model:
+  method: "cortexbridge-unified-e3-mri-clinical-teacher"
+  use_roi_branch: false
+  use_clinical: true
+  student_use_clinical: true
+  cross_geometry:
+    enabled: false
+    lambda_cg: 0.0
+  roi_graph:
+    enabled: false
+
+training:
+  teacher_checkpoint_template: "/home_data/home/zhouwl2023/project/Cortexbridge/cortexweave_roiclip/outputs/vnext_unified_clinical_20261023/e3_teacher/fold_{fold}/best_teacher.pt"
+
+loss_weights:
+  ce: 1.0
+  vnext_kd_logit: 0.5
+  vnext_kd_roi: 0.0
+  vnext_kd_graph: 0.0
+  vnext_kd_prototype: 0.0

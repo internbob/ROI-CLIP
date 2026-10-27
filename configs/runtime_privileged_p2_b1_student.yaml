@@ -1,0 +1,62 @@
+# P2 MRI-only B1 Student distilled from the clinical privileged Teacher.
+experiment_name: "CortexBridge-P2-Clinical-KD-B1-Student"
+
+data:
+  clinical:
+    enabled: true
+    features:
+      - age
+      - education
+      - apoe
+      - gds
+      - npiq_DEL
+      - npiq_HALL
+      - npiq_AGIT
+      - npiq_DEPD
+      - npiq_ANX
+      - npiq_ELAT
+      - npiq_APA
+      - npiq_DISN
+      - npiq_IRR
+      - npiq_MOT
+      - npiq_NITE
+      - npiq_APP
+
+model:
+  # Clinical features are visible to the frozen Teacher only.
+  use_roi_branch: false
+  use_clinical: true
+  student_use_clinical: false
+  clinical_fusion_mode: "gated"
+  cross_geometry:
+    enabled: false
+    lambda_cg: 0.0
+  roi_graph:
+    enabled: false
+  student_roi_classifier:
+    enabled: false
+    use_raw_tokens: true
+  student_roi_graph:
+    enabled: false
+
+training:
+  vnext_graph_student: true
+  match_teacher_available: true
+  initialize_from_teacher: false
+  warmup_epochs: 0
+  encoder_lr: 0.0001
+  inherited_lr: 0.0001
+  num_folds: 3
+  epochs: 30
+  early_stop_patience: 4
+  seed: 3407
+  teacher_checkpoint_template: "/home_data/home/zhouwl2023/project/Cortexbridge/cortexweave_roiclip/outputs/vnext_privileged_kd_20261022/p2_clinical_teacher/fold_{fold}/best_teacher.pt"
+
+loss_weights:
+  vnext_kd_logit: 0.5
+  vnext_kd_roi: 0.0
+  vnext_kd_graph: 0.0
+  vnext_kd_prototype: 0.0
+
+runtime:
+  evaluate_test: false

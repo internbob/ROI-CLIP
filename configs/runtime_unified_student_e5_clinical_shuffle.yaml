@@ -1,0 +1,4 @@
+experiment_name: "CortexBridge-Unified-E5-Student-Clinical-Shuffle"
+
+training:
+  student_clinical_shuffle: true
